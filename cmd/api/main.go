@@ -5,7 +5,10 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
+	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
