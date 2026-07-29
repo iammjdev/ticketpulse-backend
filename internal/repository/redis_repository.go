@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -11,6 +12,8 @@ import (
 type RedisRepository interface {
 	WarmupStock(ctx context.Context, eventID, zoneID string, capacity int) error
 	ReserveTicketAtomic(ctx context.Context, eventID, zoneID string, quantity int) (int64, error)
+	EnqueueUser(ctx context.Context, eventID, userID string) (int64, error)
+	GetQueuePosition(ctx context.Context, eventID, userID string) (int64, error)
 }
 
 type redisRepository struct {
@@ -54,4 +57,39 @@ func (r *redisRepository) ReserveTicketAtomic(ctx context.Context, eventID, zone
 	}
 
 	return res.(int64), nil
+}
+
+// EnqueueUser: Save user into ZSER queue using Current Timestamp (Nanoseconds) as Score
+func (r *redisRepository) EnqueueUser(ctx context.Context, eventID, userID string) (int64, error) {
+	key := fmt.Sprintf("event:%s:queue", eventID)
+	timestamp := float64(time.Now().UnixNano())
+
+	// ZAdd add User into Sorted Set
+	err := r.rdb.ZAdd(ctx, key, redis.Z{
+		Score:  timestamp,
+		Member: userID,
+	}).Err()
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Return current queue position (Rank + 1)
+	return r.GetQueuePosition(ctx, eventID, userID)
+}
+
+// GetQueuePosition: get current user's queue position from ZSER (0-indexed rank)
+func (r *redisRepository) GetQueuePosition(ctx context.Context, eventID, userID string) (int64, error) {
+	key := fmt.Sprintf("event:%s:queue", eventID)
+
+	rank, err := r.rdb.ZRank(ctx, key, userID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return -1, nil // No user found in queue
+		}
+		return 0, err
+	}
+
+	// ZRank return 0-based index, so that the proper queue position is rank + 1
+	return rank + 1, nil
 }
