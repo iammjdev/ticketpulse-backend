@@ -20,7 +20,7 @@ func main() {
 		Addr: "localhost:6379",
 	})
 
-	// Connect PostgreSQL (เพื่อใช้ในอนาคต)
+	// Connect PostgreSQL (Future usage)
 	_, err := pgx.Connect(ctx, "postgres://postgres:postgrespassword@localhost:5432/ticketpulse_db?sslmode=disable")
 	if err != nil {
 		log.Printf("⚠️ PostgreSQL Warning: %v", err)
@@ -29,11 +29,11 @@ func main() {
 	// Initialize Redis Repository & Load Lua Script
 	redisRepo, err := repository.NewRedisRepository(rdb, "internal/repository/lua/reserve_ticket.lua")
 	if err != nil {
-		log.Fatalf("❌ Failed to init Redis Lua Engine: %v", err)
+		log.Fatalf("Failed to init Redis Lua Engine: %v", err)
 	}
 	log.Println("⚡ Redis Lua Engine loaded successfully!")
 
-	// 1. Endpoint: Warm-up Stock ลง Redis (สมมติแอดมินเซ็ตตั๋วโซน VIP มี 5 ใบ)
+	// Endpoint: Warm-up Stock on
 	app.Post("/api/v1/tickets/warmup", func(c *fiber.Ctx) error {
 		type WarmupRequest struct {
 			EventID string `json:"event_id"`
@@ -58,7 +58,7 @@ func main() {
 		})
 	})
 
-	// 2. Endpoint: Reserve Ticket (ยิงตัดสต็อกด้วย Atomic Lua Script)
+	// Endpoint: Reserve Ticket (Cut stock via Atomic Lua Script)
 	app.Post("/api/v1/tickets/reserve", func(c *fiber.Ctx) error {
 		type ReserveRequest struct {
 			EventID  string `json:"event_id"`
@@ -95,6 +95,6 @@ func main() {
 		}
 	})
 
-	log.Println("🚀 Server starting on :8080...")
+	log.Println("Server starting on :8080...")
 	log.Fatal(app.Listen(":8080"))
 }

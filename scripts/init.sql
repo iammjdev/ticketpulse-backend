@@ -2,14 +2,14 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ==========================================
--- 1. ENUM TYPES SETUP
+-- ENUM TYPES SETUP
 -- ==========================================
 CREATE TYPE ticket_status AS ENUM ('AVAILABLE', 'HELD', 'RESERVED', 'SOLD');
 CREATE TYPE order_status AS ENUM ('PENDING', 'COMPLETED', 'CANCELLED', 'EXPIRED');
 CREATE TYPE seat_type AS ENUM ('SEATED', 'STANDING');
 
 -- ==========================================
--- 2. EVENTS & VENUES TABLES
+-- EVENTS & VENUES TABLES
 -- ==========================================
 CREATE TABLE venues (
                         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -33,7 +33,7 @@ CREATE TABLE events (
 );
 
 -- ==========================================
--- 3. SEAT ZONES & INVENTORY TRACKING
+-- SEAT ZONES & INVENTORY TRACKING
 -- ==========================================
 CREATE TABLE seat_zones (
                             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -85,7 +85,7 @@ CREATE TABLE order_items (
 );
 
 -- ==========================================
--- 5. HIGH-PERFORMANCE INDEXES (CS Optimization)
+-- HIGH-PERFORMANCE INDEXES (CS Optimization)
 -- ==========================================
 -- B-Tree Compound Index for instant zone stock checks ($O(\log N)$ complexity)
 CREATE INDEX idx_tickets_event_zone_status ON tickets(event_id, zone_id, status);
