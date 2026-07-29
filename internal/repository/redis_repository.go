@@ -11,7 +11,7 @@ import (
 
 type RedisRepository interface {
 	WarmupStock(ctx context.Context, eventID, zoneID string, capacity int) error
-	ReserveTicketAtomic(ctx context.Context, eventID, zoneID string, quantity int) (int64, error)
+	ReserveTicket(ctx context.Context, eventID, zoneID string, quantity int) (string, error)
 	EnqueueUser(ctx context.Context, eventID, userID string) (int64, error)
 	GetQueuePosition(ctx context.Context, eventID, userID string) (int64, error)
 }
@@ -47,16 +47,23 @@ func (r *redisRepository) WarmupStock(ctx context.Context, eventID, zoneID strin
 }
 
 // ReserveTicketAtomic: Run Lua Script via SHA to reserve ticket atomically (<1ms Execution Time)
-func (r *redisRepository) ReserveTicketAtomic(ctx context.Context, eventID, zoneID string, quantity int) (int64, error) {
+func (r *redisRepository) ReserveTicket(ctx context.Context, eventID, zoneID string, quantity int) (string, error) {
 	key := fmt.Sprintf("event:%s:zone:%s:stock", eventID, zoneID)
 
-	// EVALSHA Run script via SHA Hash on Redis Memory
 	res, err := r.rdb.EvalSha(ctx, r.reserveLuaSHA, []string{key}, quantity).Result()
 	if err != nil {
-		return 0, err
+		return "ERROR", err
 	}
 
-	return res.(int64), nil
+	code := res.(int64)
+	switch code {
+	case 1:
+		return "RESERVED", nil
+	case 0:
+		return "SOLD_OUT", nil
+	default:
+		return "NOT_WARMED_UP", fmt.Errorf("stock key not initialized in redis")
+	}
 }
 
 // EnqueueUser: Save user into ZSER queue using Current Timestamp (Nanoseconds) as Score

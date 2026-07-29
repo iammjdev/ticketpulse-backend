@@ -1,0 +1,104 @@
+package worker
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/segmentio/kafka-go"
+)
+
+type OrderCreatedEvent struct {
+	OrderID   string    `json:"order_id"`
+	EventID   string    `json:"event_id"`
+	ZoneID    string    `json:"zone_id"`
+	UserID    string    `json:"user_id"`
+	Quantity  int       `json:"quantity"`
+	Price     float64   `json:"price"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type OrderWorker struct {
+	reader *kafka.Reader
+	db     *pgxpool.Pool
+}
+
+func NewOrderWorker(brokers []string, topic string, groupID string, db *pgxpool.Pool) *OrderWorker {
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:        brokers,
+		Topic:          topic,
+		GroupID:        groupID,
+		MinBytes:       1,
+		MaxBytes:       10e6,
+		MaxWait:        500 * time.Millisecond,
+		StartOffset:    kafka.FirstOffset,
+		CommitInterval: time.Second,
+	})
+
+	return &OrderWorker{
+		reader: reader,
+		db:     db,
+	}
+}
+
+func (w *OrderWorker) Start(ctx context.Context) {
+	log.Println("⚙️ Order Processing Worker initialized and listening to Kafka topic...")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("🛑 Stopping Order Processing Worker...")
+			if err := w.reader.Close(); err != nil {
+				log.Printf("⚠️ Error closing Kafka reader: %v\n", err)
+			}
+			return
+		default:
+			msg, err := w.reader.ReadMessage(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("⚠️ Kafka Consumer Error: %v\n", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			var event OrderCreatedEvent
+			if err := json.Unmarshal(msg.Value, &event); err != nil {
+				log.Printf("❌ Failed to unmarshal message: %v\n", err)
+				continue
+			}
+
+			// Ignore dummy pre-warm events
+			if event.Quantity == 0 {
+				continue
+			}
+
+			if err := w.persistOrderToDB(ctx, &event); err != nil {
+				log.Printf("❌ Failed to persist order %s to DB: %v\n", event.OrderID, err)
+			} else {
+				log.Printf("✅ Order %s successfully persisted to PostgreSQL DB!\n", event.OrderID)
+			}
+		}
+	}
+}
+
+func (w *OrderWorker) persistOrderToDB(ctx context.Context, event *OrderCreatedEvent) error {
+	// language=PostgreSQL
+	query := `
+		INSERT INTO orders (id, user_id, event_id, total_amount, status, idempotency_key, expires_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'COMPLETED', $5, $6, NOW(), NOW())
+	`
+	totalAmount := float64(event.Quantity) * event.Price
+	idempotencyKey := event.OrderID // Use OrderID as unique idempotency key
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	_, err := w.db.Exec(ctx, query, event.OrderID, event.UserID, event.EventID, totalAmount, idempotencyKey, expiresAt)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
