@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"time"
 
@@ -18,7 +19,7 @@ func NewQueueHandler(redisRepo repository.RedisRepository) *QueueHandler {
 	return &QueueHandler{redisRepo: redisRepo}
 }
 
-// JoinQueue: API for users to join the ticket queue
+// JoinQueue handles user requests to enter the event queue
 func (h *QueueHandler) JoinQueue(c *fiber.Ctx) error {
 	type QueueRequest struct {
 		EventID string `json:"event_id"`
@@ -43,7 +44,7 @@ func (h *QueueHandler) JoinQueue(c *fiber.Ctx) error {
 	})
 }
 
-// StreamQueueStatus: SSE Endpoint to stream real-time queue status to the Frontend
+// StreamQueueStatus establishes an HTTP Server-Sent Events (SSE) connection to stream queue positions in real-time
 func (h *QueueHandler) StreamQueueStatus(c *fiber.Ctx) error {
 	eventID := c.Query("event_id")
 	userID := c.Query("user_id")
@@ -52,40 +53,50 @@ func (h *QueueHandler) StreamQueueStatus(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing event_id or user_id"})
 	}
 
-	// Set HTTP Headers for Server-Sent Events (SSE)
+	// Set HTTP response headers for Server-Sent Events (SSE)
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("Transfer-Encoding", "chunked")
 
-	// Stream real-time queue data back to the client every 2 seconds
+	// Use FastHTTP StreamWriter without referencing fiber.Ctx directly inside the goroutine
 	c.Context().SetBodyStreamWriter(fasthttp.StreamWriter(func(w *bufio.Writer) {
+		bgCtx := context.Background()
+
 		for {
-			ctx := c.Context()
-			position, err := h.redisRepo.GetQueuePosition(ctx, eventID, userID)
+			// Query queue position from Redis using isolated background context
+			position, err := h.redisRepo.GetQueuePosition(bgCtx, eventID, userID)
 			if err != nil {
 				fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
-				w.Flush()
+				_ = w.Flush()
 				break
 			}
 
-			// Send queue data event in SSE Format (`data: {...}\n\n`)
+			// Construct SSE event message payload
 			data := fmt.Sprintf("{\"user_id\": \"%s\", \"queue_position\": %d, \"timestamp\": \"%s\"}",
 				userID, position, time.Now().Format(time.RFC3339))
 
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			if err := w.Flush(); err != nil {
-				// Client Disconnected (closed the web page)
+			// Write SSE formatted stream payload
+			_, writeErr := fmt.Fprintf(w, "data: %s\n\n", data)
+			if writeErr != nil {
+				// Break loop if client disconnected
 				break
 			}
 
-			// If it's the user's turn (position 1), notify them to proceed to checkout
+			// Flush buffer to force transmission over network
+			if flushErr := w.Flush(); flushErr != nil {
+				// Connection reset or closed by client
+				break
+			}
+
+			// Notify client and terminate stream when position reaches 1
 			if position == 1 {
 				fmt.Fprintf(w, "event: ready\ndata: {\"message\": \"It's your turn! Proceed to checkout.\"}\n\n")
-				w.Flush()
+				_ = w.Flush()
 				break
 			}
 
+			// Interval between queue updates
 			time.Sleep(2 * time.Second)
 		}
 	}))
