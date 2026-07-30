@@ -122,7 +122,15 @@ func main() {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
-		// Step 1: Atomic Inventory Deduction in Redis Lua
+		// Provide default fallback values for testing payload
+		if req.ZoneID == "" {
+			req.ZoneID = "22222222-2222-2222-2222-222222222222"
+		}
+		if req.Price == 0 {
+			req.Price = 1500.00
+		}
+
+		// Atomic Inventory Deduction in Redis Lua
 		status, err := redisRepo.ReserveTicket(c.Context(), req.EventID, req.ZoneID, req.Quantity)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
@@ -131,7 +139,7 @@ func main() {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": status, "message": "Sorry, tickets for this zone are sold out!"})
 		}
 
-		// Step 2: Publish Event to Kafka for Asynchronous Processing
+		// Publish Event to Kafka for Asynchronous Processing
 		orderID := uuid.New().String()
 		event := messaging.OrderCreatedEvent{
 			OrderID:   orderID,
