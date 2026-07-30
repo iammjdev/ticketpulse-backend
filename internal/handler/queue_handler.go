@@ -66,10 +66,10 @@ func (h *QueueHandler) StreamQueueStatus(c *fiber.Ctx) error {
 		for {
 			// Query queue position from Redis using isolated background context
 			position, err := h.redisRepo.GetQueuePosition(bgCtx, eventID, userID)
-			if err != nil {
-				fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
-				_ = w.Flush()
-				break
+
+			// Guard Check: If user not found in queue (pos <= 0) or error occurs, set position to 0
+			if err != nil || position <= 0 {
+				position = 0
 			}
 
 			// Construct SSE event message payload

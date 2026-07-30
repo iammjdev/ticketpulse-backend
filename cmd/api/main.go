@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -80,6 +81,13 @@ func main() {
 		AppName: "TicketPulse Enterprise Engine v1.0",
 	})
 
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     "http://localhost:3000",
+		AllowHeaders:     "Origin, Content-Type, Accept",
+		AllowMethods:     "GET, POST, HEAD, PUT, DELETE, PATCH, OPTIONS",
+		AllowCredentials: true,
+	}))
+
 	// Health Check Endpoint
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -139,6 +147,13 @@ func main() {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": status, "message": "Sorry, tickets for this zone are sold out!"})
 		}
 
+		// Dequeue user from Redis Virtual Waiting Room after successful reservation
+		if err := redisRepo.DequeueUser(c.Context(), req.EventID, req.UserID); err != nil {
+			log.Printf("⚠️ Failed to dequeue user %s from Redis: %v\n", req.UserID, err)
+		} else {
+			log.Printf("🗑️ Successfully dequeued user %s from Redis queue\n", req.UserID)
+		}
+
 		// Publish Event to Kafka for Asynchronous Processing
 		orderID := uuid.New().String()
 		event := messaging.OrderCreatedEvent{
@@ -180,7 +195,7 @@ func main() {
 	}()
 
 	<-sigChan
-	log.Println("🛑 Shutting down TicketPulse API Gracefully...")
+	log.Println("🛑 Shutting down TicketPulse API...")
 	cancel()
 	_ = app.Shutdown()
 	log.Println("✅ Server stopped successfully.")

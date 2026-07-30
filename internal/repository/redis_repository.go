@@ -14,6 +14,7 @@ type RedisRepository interface {
 	ReserveTicket(ctx context.Context, eventID, zoneID string, quantity int) (string, error)
 	EnqueueUser(ctx context.Context, eventID, userID string) (int64, error)
 	GetQueuePosition(ctx context.Context, eventID, userID string) (int64, error)
+	DequeueUser(ctx context.Context, eventID string, userID string) error
 }
 
 type redisRepository struct {
@@ -99,4 +100,10 @@ func (r *redisRepository) GetQueuePosition(ctx context.Context, eventID, userID 
 
 	// ZRank return 0-based index, so that the proper queue position is rank + 1
 	return rank + 1, nil
+}
+
+// DequeueUser removes a user from the Redis Sorted Set queue after successful reservation
+func (r *redisRepository) DequeueUser(ctx context.Context, eventID string, userID string) error {
+	queueKey := fmt.Sprintf("event:%s:queue", eventID)
+	return r.rdb.ZRem(ctx, queueKey, userID).Err()
 }
