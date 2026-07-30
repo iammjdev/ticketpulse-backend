@@ -44,7 +44,7 @@ export default function () {
 
         const joinRes = http.post(`${BASE_URL}/api/v1/queue/join`, joinPayload, { headers });
         const joinSuccess = check(joinRes, {
-            'Queue Join HTTP 200/201': (r) => r.status === 200 || r.status === 201,
+            'Queue Join HTTP 200/201/202': (r) => r.status >= 200 && r.status <= 202,
         });
 
         if (!joinSuccess) {
@@ -59,7 +59,9 @@ export default function () {
         const reservePayload = JSON.stringify({
             user_id: userId,
             event_id: EVENT_ID,
+            zone_id: '22222222-2222-2222-2222-222222222222',
             quantity: 1,
+            price: 6500.00,
         });
 
         const startTime = Date.now();
@@ -67,11 +69,11 @@ export default function () {
         const duration = Date.now() - startTime;
         reserveLatency.add(duration);
 
-        if (reserveRes.status === 200 || reserveRes.status === 201) {
+        if (reserveRes.status === 200 || reserveRes.status === 201 || reserveRes.status === 202) {
             successfulReservations.add(1);
             errorRate.add(0);
             check(reserveRes, {
-                'Ticket Reservation Successful': (r) => r.status === 200 || r.status === 201,
+                'Ticket Reservation Successful': (r) => r.status === 202 || r.status === 200,
             });
         } else if (reserveRes.status === 400 || reserveRes.status === 409) {
             // Stock exhausted / Event sold out (Valid business state, NOT a server error)
