@@ -31,6 +31,11 @@ func (h *QueueHandler) JoinQueue(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid payload"})
 	}
 
+	// Authenticated user id from JWT always takes precedence over the request body
+	if userID, ok := c.Locals("userId").(string); ok && userID != "" {
+		req.UserID = userID
+	}
+
 	position, err := h.redisRepo.EnqueueUser(c.Context(), req.EventID, req.UserID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})

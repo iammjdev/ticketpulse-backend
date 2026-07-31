@@ -16,8 +16,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/iammjdev/ticketpulse-backend/internal/domain"
 	"github.com/iammjdev/ticketpulse-backend/internal/handler"
+	authmw "github.com/iammjdev/ticketpulse-backend/internal/middleware"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
+	"github.com/iammjdev/ticketpulse-backend/internal/service"
 	"github.com/iammjdev/ticketpulse-backend/internal/worker"
 	"github.com/iammjdev/ticketpulse-backend/pkg/messaging"
 )
@@ -80,6 +83,10 @@ func main() {
 	// 5. Initialize Handlers
 	queueHandler := handler.NewQueueHandler(redisRepo)
 
+	userRepo := repository.NewUserRepository(dbPool)
+	authService := service.NewAuthService(userRepo)
+	authHandler := handler.NewAuthHandler(authService)
+
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
 		AppName: "TicketPulse Enterprise Engine v1.0",
@@ -87,7 +94,7 @@ func main() {
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     "http://localhost:3000",
-		AllowHeaders:     "Origin, Content-Type, Accept",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 		AllowMethods:     "GET, POST, HEAD, PUT, DELETE, PATCH, OPTIONS",
 		AllowCredentials: true,
 	}))
@@ -121,7 +128,7 @@ func main() {
 		return c.JSON(fiber.Map{"message": "Stock warmed up successfully in Redis!", "event_id": req.EventID, "zone_id": req.ZoneID, "stock": req.Stock})
 	})
 
-	app.Post("/api/v1/tickets/reserve", func(c *fiber.Ctx) error {
+	app.Post("/api/v1/tickets/reserve", authmw.JWTMiddleware, func(c *fiber.Ctx) error {
 		type ReserveReq struct {
 			EventID  string  `json:"event_id"`
 			ZoneID   string  `json:"zone_id"`
@@ -132,6 +139,11 @@ func main() {
 		var req ReserveReq
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		// Authenticated user id from JWT always takes precedence over the request body
+		if userID, ok := c.Locals("userId").(string); ok && userID != "" {
+			req.UserID = userID
 		}
 
 		// Provide default fallback values for testing payload
@@ -187,8 +199,20 @@ func main() {
 	})
 
 	// Virtual Queue Endpoints
-	app.Post("/api/v1/queue/join", queueHandler.JoinQueue)
+	app.Post("/api/v1/queue/join", authmw.JWTMiddleware, queueHandler.JoinQueue)
 	app.Get("/api/v1/queue/stream", queueHandler.StreamQueueStatus)
+
+	// Auth Endpoints
+	auth := app.Group("/api/v1/auth")
+	auth.Post("/register", authHandler.Register)
+	auth.Post("/login", authHandler.Login)
+	auth.Get("/me", authmw.JWTMiddleware, authHandler.Me)
+
+	// Admin Endpoints (JWT + ADMIN role required)
+	admin := app.Group("/api/v1/admin", authmw.JWTMiddleware, authmw.RequireRole(string(domain.RoleAdmin)))
+	admin.Get("/ping", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok", "scope": "admin"})
+	})
 
 	// Graceful Shutdown Setup
 	sigChan := make(chan os.Signal, 1)

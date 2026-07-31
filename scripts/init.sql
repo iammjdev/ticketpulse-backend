@@ -1,5 +1,6 @@
--- Enable UUID extension for secure and non-enumerable primary keys
+-- Enable UUID extensions for secure and non-enumerable primary keys
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ==========================================
 -- ENUM TYPES SETUP
@@ -7,6 +8,37 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TYPE ticket_status AS ENUM ('AVAILABLE', 'HELD', 'RESERVED', 'SOLD');
 CREATE TYPE order_status AS ENUM ('PENDING', 'COMPLETED', 'CANCELLED', 'EXPIRED');
 CREATE TYPE seat_type AS ENUM ('SEATED', 'STANDING');
+
+DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('USER', 'ADMIN', 'GATE_STAFF');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- ==========================================
+-- USERS & AUTHENTICATION
+-- ==========================================
+CREATE TABLE IF NOT EXISTS users (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        email VARCHAR(255) UNIQUE NOT NULL,
+                        password_hash VARCHAR(255) NOT NULL,
+                        full_name VARCHAR(100) NOT NULL,
+                        phone VARCHAR(20),
+                        national_id VARCHAR(20),
+                        role user_role DEFAULT 'USER'::user_role NOT NULL,
+                        member_tier VARCHAR(20) DEFAULT 'REGULAR' NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- Seed test accounts (bcrypt cost 10)
+INSERT INTO users (email, password_hash, full_name, role, member_tier)
+VALUES
+    ('admin@ticketpulse.com', '$2a$10$sGnj2rjxgq51mW8SsvS0xuRzDi40l1OFe.O9WHVgE7G.ReRRP0WUa', 'TicketPulse Admin', 'ADMIN', 'REGULAR'),
+    ('user@ticketpulse.com', '$2a$10$dGBTl3iOqhSMxnuWP6KOpu1lHriGhIzWTR3uVIqOJhw.pyUSUfsnq', 'Demo User', 'USER', 'REGULAR')
+ON CONFLICT (email) DO NOTHING;
 
 -- ==========================================
 -- EVENTS & VENUES TABLES
