@@ -88,14 +88,14 @@ func (w *OrderWorker) Start(ctx context.Context) {
 func (w *OrderWorker) persistOrderToDB(ctx context.Context, event *OrderCreatedEvent) error {
 	// language=PostgreSQL
 	query := `
-		INSERT INTO orders (id, user_id, event_id, total_amount, status, idempotency_key, expires_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'COMPLETED', $5, $6, NOW(), NOW())
+		INSERT INTO orders (id, user_id, event_id, zone_id, quantity, total_amount, status, idempotency_key, expires_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETED', $7, $8, NOW(), NOW())
 	`
 	totalAmount := float64(event.Quantity) * event.Price
 	idempotencyKey := event.OrderID // Use OrderID as unique idempotency key
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	_, err := w.db.Exec(ctx, query, event.OrderID, event.UserID, event.EventID, totalAmount, idempotencyKey, expiresAt)
+	_, err := w.db.Exec(ctx, query, event.OrderID, event.UserID, event.EventID, event.ZoneID, event.Quantity, totalAmount, idempotencyKey, expiresAt)
 	if err != nil {
 		return err
 	}

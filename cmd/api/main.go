@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -84,8 +83,13 @@ func main() {
 	queueHandler := handler.NewQueueHandler(redisRepo)
 
 	userRepo := repository.NewUserRepository(dbPool)
-	authService := service.NewAuthService(userRepo)
+	authService := service.NewAuthService(userRepo, redisClient)
 	authHandler := handler.NewAuthHandler(authService)
+
+	eventRepo := repository.NewEventRepository(dbPool)
+	orderRepo := repository.NewOrderRepository(dbPool)
+	orderHandler := handler.NewOrderHandler(orderRepo, userRepo)
+	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
 
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
@@ -128,75 +132,7 @@ func main() {
 		return c.JSON(fiber.Map{"message": "Stock warmed up successfully in Redis!", "event_id": req.EventID, "zone_id": req.ZoneID, "stock": req.Stock})
 	})
 
-	app.Post("/api/v1/tickets/reserve", authmw.JWTMiddleware, func(c *fiber.Ctx) error {
-		type ReserveReq struct {
-			EventID  string  `json:"event_id"`
-			ZoneID   string  `json:"zone_id"`
-			UserID   string  `json:"user_id"`
-			Quantity int     `json:"quantity"`
-			Price    float64 `json:"price"`
-		}
-		var req ReserveReq
-		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-		}
-
-		// Authenticated user id from JWT always takes precedence over the request body
-		if userID, ok := c.Locals("userId").(string); ok && userID != "" {
-			req.UserID = userID
-		}
-
-		// Provide default fallback values for testing payload
-		if req.ZoneID == "" {
-			req.ZoneID = "22222222-2222-2222-2222-222222222222"
-		}
-		if req.Price == 0 {
-			req.Price = 1500.00
-		}
-
-		// Atomic Inventory Deduction in Redis Lua
-		status, err := redisRepo.ReserveTicket(c.Context(), req.EventID, req.ZoneID, req.Quantity)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-		}
-		if status != "RESERVED" {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"status": status, "message": "Sorry, tickets for this zone are sold out!"})
-		}
-
-		// Dequeue user from Redis Virtual Waiting Room after successful reservation
-		if err := redisRepo.DequeueUser(c.Context(), req.EventID, req.UserID); err != nil {
-			log.Printf("⚠️ Failed to dequeue user %s from Redis: %v\n", req.UserID, err)
-		} else {
-			log.Printf("🗑️ Successfully dequeued user %s from Redis queue\n", req.UserID)
-		}
-
-		// Publish Event to Kafka for Asynchronous Processing
-		orderID := uuid.New().String()
-		event := messaging.OrderCreatedEvent{
-			OrderID:   orderID,
-			EventID:   req.EventID,
-			ZoneID:    req.ZoneID,
-			UserID:    req.UserID,
-			Quantity:  req.Quantity,
-			Price:     req.Price,
-			Timestamp: time.Now(),
-		}
-
-		if err := kafkaProducer.PublishOrderCreated(c.Context(), event); err != nil {
-			log.Printf("⚠️ Failed to publish order event to Kafka: %v\n", err)
-		} else {
-			log.Printf("📢 Published OrderCreatedEvent to Kafka: OrderID=%s\n", orderID)
-		}
-
-		holdKey := fmt.Sprintf("hold:%s:%s:%d:%s", req.EventID, req.ZoneID, req.Quantity, req.UserID)
-		_ = redisClient.Set(c.Context(), holdKey, "HELD", 10*time.Minute).Err()
-
-		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-			"status":   "RESERVED",
-			"message":  "Ticket reserved! Order is being processed asynchronously.",
-			"order_id": orderID,
-		})
-	})
+	app.Post("/api/v1/tickets/reserve", authmw.JWTMiddleware, ticketHandler.Reserve)
 
 	// Virtual Queue Endpoints
 	app.Post("/api/v1/queue/join", authmw.JWTMiddleware, queueHandler.JoinQueue)
@@ -205,8 +141,19 @@ func main() {
 	// Auth Endpoints
 	auth := app.Group("/api/v1/auth")
 	auth.Post("/register", authHandler.Register)
+	auth.Post("/verify-otp", authHandler.VerifyOTP)
+	auth.Post("/resend-otp", authHandler.ResendOTP)
 	auth.Post("/login", authHandler.Login)
 	auth.Get("/me", authmw.JWTMiddleware, authHandler.Me)
+
+	// User Profile Endpoints
+	app.Put("/api/v1/users/profile", authmw.JWTMiddleware, authHandler.UpdateProfile)
+
+	// Order History Endpoints
+	app.Get("/api/v1/orders/my-orders", authmw.JWTMiddleware, orderHandler.GetMyOrders)
+
+	// Gate Verification Endpoint (ADMIN or GATE_STAFF)
+	app.Post("/api/v1/tickets/verify", authmw.JWTMiddleware, authmw.RequireAnyRole(string(domain.RoleAdmin), string(domain.RoleGateStaff)), orderHandler.VerifyTicket)
 
 	// Admin Endpoints (JWT + ADMIN role required)
 	admin := app.Group("/api/v1/admin", authmw.JWTMiddleware, authmw.RequireRole(string(domain.RoleAdmin)))

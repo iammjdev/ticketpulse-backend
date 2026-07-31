@@ -19,6 +19,7 @@ type User struct {
 	NationalID   string    `json:"national_id"`
 	Role         UserRole  `json:"role"`
 	MemberTier   string    `json:"member_tier"`
+	IsVerified   bool      `json:"is_verified"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

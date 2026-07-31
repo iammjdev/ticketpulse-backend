@@ -29,11 +29,18 @@ func JWTMiddleware(c *fiber.Ctx) error {
 
 // RequireRole guards a route to only the given role. Must run after JWTMiddleware.
 func RequireRole(requiredRole string) fiber.Handler {
+	return RequireAnyRole(requiredRole)
+}
+
+// RequireAnyRole guards a route to any of the given roles. Must run after JWTMiddleware.
+func RequireAnyRole(roles ...string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		role, _ := c.Locals("userRole").(string)
-		if role != requiredRole {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Insufficient permissions"})
+		for _, r := range roles {
+			if role == r {
+				return c.Next()
+			}
 		}
-		return c.Next()
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Insufficient permissions"})
 	}
 }
