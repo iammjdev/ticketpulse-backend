@@ -1,0 +1,29 @@
+name: TicketPulse Continuous Integration (CI)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Run Linters & Tests
+      run: |
+        go mod download
+        go test -v ./...
+
+    - name: Build Docker Image
+      run: |
+        docker build -t ticketpulse-app .
