@@ -15,6 +15,12 @@ EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
 
+DO $$ BEGIN
+    CREATE TYPE event_status AS ENUM ('UPCOMING', 'PRE_WAITING', 'LIVE', 'ENDED');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
 -- ==========================================
 -- USERS & AUTHENTICATION
 -- ==========================================
@@ -62,6 +68,7 @@ CREATE TABLE events (
                         sale_start_date TIMESTAMPTZ NOT NULL,
                         sale_end_date TIMESTAMPTZ NOT NULL,
                         requires_id_verification BOOLEAN NOT NULL DEFAULT FALSE,
+                        status event_status NOT NULL DEFAULT 'UPCOMING',
                         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -87,6 +94,17 @@ VALUES
     ('66666666-6666-6666-6666-666666666666', 'a3333333-3333-3333-3333-333333333333', 'Studio Ghibli: Art of the Score', NULL, '2026-11-01T19:00:00+07:00', '2026-06-01T10:00:00+07:00', '2026-11-01T18:00:00+07:00', FALSE)
 ON CONFLICT (id) DO NOTHING;
 
+-- All events are on sale except the Lion King run, which stays UPCOMING (matches its
+-- original "coming-soon" queue state in the frontend's prior static catalog).
+UPDATE events SET status = 'LIVE'
+WHERE id IN (
+    '11111111-1111-1111-1111-111111111111',
+    '22222222-2222-2222-2222-222222222222',
+    '33333333-3333-3333-3333-333333333333',
+    '55555555-5555-5555-5555-555555555555',
+    '66666666-6666-6666-6666-666666666666'
+);
+
 -- ==========================================
 -- SEAT ZONES & INVENTORY TRACKING
 -- ==========================================
@@ -101,6 +119,35 @@ CREATE TABLE seat_zones (
                             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                             UNIQUE(event_id, zone_name)
 );
+
+-- Multi-tier ticket inventory per event — available_stock mirrors total_capacity at seed
+-- time; live availability is tracked in Redis (see WarmupStock/ReserveTicket).
+INSERT INTO seat_zones (event_id, zone_name, seat_type, price, total_capacity, available_stock)
+VALUES
+    ('11111111-1111-1111-1111-111111111111', 'VIP Standing', 'STANDING', 9800, 500, 500),
+    ('11111111-1111-1111-1111-111111111111', 'CAT 1 Seated', 'SEATED', 6500, 2000, 2000),
+    ('11111111-1111-1111-1111-111111111111', 'CAT 2 Seated', 'SEATED', 2800, 4000, 4000),
+
+    ('22222222-2222-2222-2222-222222222222', 'VIP Standing', 'STANDING', 12500, 400, 400),
+    ('22222222-2222-2222-2222-222222222222', 'CAT 1 Seated', 'SEATED', 7500, 1800, 1800),
+    ('22222222-2222-2222-2222-222222222222', 'CAT 2 Seated', 'SEATED', 3500, 3500, 3500),
+
+    ('33333333-3333-3333-3333-333333333333', 'Ringside', 'SEATED', 5000, 200, 200),
+    ('33333333-3333-3333-3333-333333333333', 'CAT 1 Seated', 'SEATED', 2800, 1000, 1000),
+    ('33333333-3333-3333-3333-333333333333', 'General Seated', 'SEATED', 1200, 2500, 2500),
+
+    ('44444444-4444-4444-4444-444444444444', 'VIP Seated', 'SEATED', 6500, 150, 150),
+    ('44444444-4444-4444-4444-444444444444', 'CAT 1 Seated', 'SEATED', 3800, 500, 500),
+    ('44444444-4444-4444-4444-444444444444', 'CAT 2 Seated', 'SEATED', 1500, 900, 900),
+
+    ('55555555-5555-5555-5555-555555555555', 'VIP GA', 'STANDING', 15900, 600, 600),
+    ('55555555-5555-5555-5555-555555555555', 'CAT 1 GA', 'STANDING', 8500, 2000, 2000),
+    ('55555555-5555-5555-5555-555555555555', 'General GA', 'STANDING', 4200, 5000, 5000),
+
+    ('66666666-6666-6666-6666-666666666666', 'VIP Seated', 'SEATED', 4500, 150, 150),
+    ('66666666-6666-6666-6666-666666666666', 'CAT 1 Seated', 'SEATED', 2500, 500, 500),
+    ('66666666-6666-6666-6666-666666666666', 'CAT 2 Seated', 'SEATED', 1000, 900, 900)
+ON CONFLICT (event_id, zone_name) DO NOTHING;
 
 CREATE TABLE tickets (
                          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

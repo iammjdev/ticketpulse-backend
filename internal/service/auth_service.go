@@ -30,11 +30,12 @@ const (
 )
 
 var (
-	ErrEmailTaken          = errors.New("an account with this email already exists")
-	ErrInvalidCredentials  = errors.New("invalid email or password")
-	ErrEmailNotVerified    = errors.New("email not verified")
-	ErrInvalidOrExpiredOTP = errors.New("invalid or expired otp")
-	ErrResendCooldown      = errors.New("please wait before requesting another code")
+	ErrEmailTaken             = errors.New("an account with this email already exists")
+	ErrInvalidCredentials     = errors.New("invalid email or password")
+	ErrEmailNotVerified       = errors.New("email not verified")
+	ErrInvalidOrExpiredOTP    = errors.New("invalid or expired otp")
+	ErrResendCooldown         = errors.New("please wait before requesting another code")
+	ErrInvalidCurrentPassword = errors.New("current password is incorrect")
 )
 
 func jwtSecret() []byte {
@@ -221,6 +222,25 @@ func (s *AuthService) GetProfile(ctx context.Context, userID string) (*domain.Us
 
 func (s *AuthService) UpdateProfile(ctx context.Context, userID, fullName, phone, nationalID string) (*domain.User, error) {
 	return s.users.UpdateProfile(ctx, userID, fullName, phone, nationalID)
+}
+
+// ChangePassword verifies currentPassword against the stored hash before committing newPassword.
+func (s *AuthService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrInvalidCurrentPassword
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+	if err != nil {
+		return err
+	}
+
+	return s.users.UpdatePasswordHash(ctx, userID, string(hash))
 }
 
 func generateToken(user *domain.User) (string, error) {

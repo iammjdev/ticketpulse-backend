@@ -90,6 +90,7 @@ func main() {
 	orderRepo := repository.NewOrderRepository(dbPool)
 	orderHandler := handler.NewOrderHandler(orderRepo, userRepo)
 	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
+	eventHandler := handler.NewEventHandler(eventRepo, redisRepo)
 
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
@@ -134,6 +135,10 @@ func main() {
 
 	app.Post("/api/v1/tickets/reserve", authmw.JWTMiddleware, ticketHandler.Reserve)
 
+	// Public Event & Venue Read Endpoints
+	app.Get("/api/v1/events", eventHandler.ListEvents)
+	app.Get("/api/v1/events/:id", eventHandler.GetEvent)
+
 	// Virtual Queue Endpoints
 	app.Post("/api/v1/queue/join", authmw.JWTMiddleware, queueHandler.JoinQueue)
 	app.Get("/api/v1/queue/stream", queueHandler.StreamQueueStatus)
@@ -148,6 +153,7 @@ func main() {
 
 	// User Profile Endpoints
 	app.Put("/api/v1/users/profile", authmw.JWTMiddleware, authHandler.UpdateProfile)
+	app.Put("/api/v1/users/password", authmw.JWTMiddleware, authHandler.ChangePassword)
 
 	// Order History Endpoints
 	app.Get("/api/v1/orders/my-orders", authmw.JWTMiddleware, orderHandler.GetMyOrders)
@@ -160,6 +166,7 @@ func main() {
 	admin.Get("/ping", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "scope": "admin"})
 	})
+	admin.Post("/events", eventHandler.CreateEvent)
 
 	// Graceful Shutdown Setup
 	sigChan := make(chan os.Signal, 1)

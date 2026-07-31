@@ -12,7 +12,11 @@ import (
 	"github.com/iammjdev/ticketpulse-backend/internal/service"
 )
 
-var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+var (
+	emailPattern      = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+	nationalIDPattern = regexp.MustCompile(`^\d{13}$`)
+	nonDigitPattern   = regexp.MustCompile(`\D`)
+)
 
 type AuthHandler struct {
 	authService *service.AuthService
@@ -164,8 +168,12 @@ func (h *AuthHandler) UpdateProfile(c *fiber.Ctx) error {
 	}
 
 	req.FullName = strings.TrimSpace(req.FullName)
+	req.NationalID = nonDigitPattern.ReplaceAllString(req.NationalID, "")
 	if req.FullName == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Full name is required"})
+	}
+	if req.NationalID != "" && !nationalIDPattern.MatchString(req.NationalID) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "National ID must be 13 numeric digits"})
 	}
 
 	user, err := h.authService.UpdateProfile(c.Context(), userID, req.FullName, req.Phone, req.NationalID)
@@ -177,6 +185,37 @@ func (h *AuthHandler) UpdateProfile(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"user": userResponse(user)})
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// ChangePassword verifies the caller's current password before committing a new one.
+func (h *AuthHandler) ChangePassword(c *fiber.Ctx) error {
+	userID, _ := c.Locals("userId").(string)
+
+	var req changePasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	if len(req.NewPassword) < 6 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "New password must be at least 6 characters"})
+	}
+
+	if err := h.authService.ChangePassword(c.Context(), userID, req.CurrentPassword, req.NewPassword); err != nil {
+		switch {
+		case errors.Is(err, service.ErrInvalidCurrentPassword):
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "INVALID_CURRENT_PASSWORD"})
+		case errors.Is(err, repository.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update password"})
+		}
+	}
+
+	return c.JSON(fiber.Map{"message": "PASSWORD_UPDATED_SUCCESSFULLY"})
 }
 
 func (h *AuthHandler) Me(c *fiber.Ctx) error {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
+	"github.com/iammjdev/ticketpulse-backend/internal/service"
 )
 
 type OrderHandler struct {
@@ -32,6 +33,8 @@ func orderResponse(o *domain.Order) fiber.Map {
 		"status":        o.Status,
 		"created_at":    o.CreatedAt,
 		"checked_in_at": o.CheckedInAt,
+		// HMAC-SHA256(order id) — embedded in the QR payload and re-verified at the gate.
+		"signature": service.SignTicketID(o.ID),
 	}
 }
 
@@ -52,34 +55,50 @@ func (h *OrderHandler) GetMyOrders(c *fiber.Ctx) error {
 }
 
 type verifyTicketRequest struct {
-	OrderID string `json:"order_id"`
+	TicketID  string `json:"ticket_id"`
+	Signature string `json:"signature"`
 }
 
-// VerifyTicket is the gate-side scan endpoint: validates the order id and flips it to
-// CHECKED_IN. Restricted to ADMIN / GATE_STAFF via RequireAnyRole.
+// VerifyTicket is the gate-side scan endpoint. It authenticates the QR payload's HMAC-SHA256
+// signature against ticket_id (no DB round trip needed to detect tampering), then flips the
+// matching order to CHECKED_IN. Restricted to ADMIN / GATE_STAFF via RequireAnyRole.
 func (h *OrderHandler) VerifyTicket(c *fiber.Ctx) error {
 	var req verifyTicketRequest
-	if err := c.BodyParser(&req); err != nil || req.OrderID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "order_id is required"})
+	if err := c.BodyParser(&req); err != nil || req.TicketID == "" || req.Signature == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ticket_id and signature are required"})
 	}
 
-	order, err := h.orders.VerifyAndCheckInTicket(c.Context(), req.OrderID)
+	if !service.VerifyTicketSignature(req.TicketID, req.Signature) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "INVALID_SIGNATURE", "message": "Ticket signature could not be verified"})
+	}
+
+	order, err := h.orders.VerifyAndCheckInTicket(c.Context(), req.TicketID)
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrOrderNotFound):
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Order not found"})
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "TICKET_NOT_FOUND"})
 		case errors.Is(err, repository.ErrOrderAlreadyIn):
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "TICKET_ALREADY_USED", "message": "Ticket has already been checked in"})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "TICKET_ALREADY_USED", "checked_in_at": order.CheckedInAt})
+		case errors.Is(err, repository.ErrOrderCancelled):
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "TICKET_CANCELLED"})
 		case errors.Is(err, repository.ErrOrderNotEligible):
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Order is not eligible for check-in"})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "TICKET_NOT_ELIGIBLE"})
 		default:
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to verify ticket"})
 		}
 	}
 
-	result := fiber.Map{"order": orderResponse(order)}
+	holderName := ""
 	if holder, err := h.users.FindByID(c.Context(), order.UserID); err == nil {
-		result["holder"] = fiber.Map{"full_name": holder.FullName, "email": holder.Email}
+		holderName = holder.FullName
 	}
-	return c.JSON(result)
+
+	return c.JSON(fiber.Map{
+		"ticket_id":     order.ID,
+		"user_name":     holderName,
+		"event_title":   order.EventTitle,
+		"zone_name":     order.ZoneID,
+		"checked_in_at": order.CheckedInAt,
+		"status":        order.Status,
+	})
 }
