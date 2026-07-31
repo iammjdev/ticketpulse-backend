@@ -1,10 +1,11 @@
+
 # TicketPulse — High-Throughput Distributed Ticketing Engine
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat-square&logo=go)](https://golang.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-Event--Driven%20%2F%20EDA-FF6F00?style=flat-square)](https://github.com/)
 [![Redis](https://img.shields.io/badge/Redis-7.0%20(Lua%20Engine)-DC382D?style=flat-square&logo=redis)](https://redis.io/)
 [![Kafka](https://img.shields.io/badge/Apache%20Kafka-KRaft%20Mode-231F20?style=flat-square&logo=apachekafka)](https://kafka.apache.org/)
-[![k6 Benchmark](https://img.shields.io/badge/k6%20Benchmark-6%2C800%2B%20RPS-7D4646?style=flat-square&logo=k6)](https://k6.io/)
+[![k6 Benchmark](https://img.shields.io/badge/k6%20Benchmark-5%2C800%2B%20RPS-7D4646?style=flat-square&logo=k6)](https://k6.io/)
 
 **TicketPulse** is an enterprise-grade, high-concurrency event ticketing backend engine designed to withstand extreme traffic spikes during flash sales. Engineered in **Go (Fiber framework)**, the system guarantees **zero overselling** under concurrent demand through atomic inventory allocation using **Redis Lua Scripts**, real-time virtual queueing via **Redis Sorted Sets (ZSET) & Server-Sent Events (SSE)**, and asynchronous, eventual-consistency order persistence leveraging **Apache Kafka (KRaft mode)** and **PostgreSQL 16**.
 
@@ -15,7 +16,7 @@
 - **Atomic Inventory Lock & Zero Overselling Guarantee:** Solves race conditions at the memory layer by executing non-blocking, single-threaded **Lua Scripts in Redis**, preventing database deadlock and thread contention.
 - **Virtual Waiting Room Engine (Fair FIFO Queue):** Enforces rate-limiting and access control using **Redis ZSET**, dynamically calculating rank and streaming live queue updates to clients over HTTP Server-Sent Events (SSE).
 - **Asynchronous Event-Driven Order Processing:** Offloads heavy relational database writes by publishing `OrderCreatedEvent` to an **Apache Kafka** event stream, consumed by decoupled background workers for idempotent persistence into **PostgreSQL**.
-- **Battle-Tested High Concurrency:** Proven under stress testing to sustain **6,800+ RPS** with sub-25ms $P_{95}$ latency and **0.00% error rate**.
+- **Battle-Tested High Concurrency:** Proven under stress testing to sustain **5,820+ RPS** with sub-35ms $P_{95}$ latency and **0.00% unexpected error rate**.
 
 ---
 
@@ -66,7 +67,7 @@ sequenceDiagram
 
 ---
 
-## ⚡ Performance Benchmark Results (k6 Load Testing)
+## Performance Benchmark Results (k6 Load Testing)
 
 Extensive load testing was executed using **Grafana k6** simulating **500 Concurrent Virtual Users (VUs)** executing high-concurrency booking flows over a 70-second execution window.
 
@@ -74,15 +75,15 @@ Extensive load testing was executed using **Grafana k6** simulating **500 Concur
 
 | Metric | Result | Threshold / Target | Status |
 | --- | --- | --- | --- |
-| **Throughput (RPS)** | **6,801.58 req/sec** | > 1,000 req/sec | 🟢 PASS |
-| **Total Processed Requests** | **476,342 Requests** | N/A | 🟢 PASS |
-| **Average Response Latency** | **7.49 ms** | < 50 ms | 🟢 PASS |
-| **95th Percentile Latency ($P_{95}$)** | **22.15 ms** | < 200 ms | 🟢 PASS |
-| **99th Percentile Latency ($P_{99}$)** | **35.10 ms** | < 500 ms | 🟢 PASS |
+| **Throughput (RPS)** | **5,827.68 req/sec** | > 1,000 req/sec | 🟢 PASS |
+| **Total Processed Requests** | **408,208 Requests** | N/A | 🟢 PASS |
+| **Average Response Latency** | **12.72 ms** | < 50 ms | 🟢 PASS |
+| **95th Percentile Latency ($P_{95}$)** | **31.19 ms** | < 200 ms | 🟢 PASS |
+| **99th Percentile Latency ($P_{99}$)** | **61.84 ms** | < 500 ms | 🟢 PASS |
 | **Unexpected System Error Rate** | **0.00%** | < 1.00% | 🟢 PASS |
-| **Successful Ticket Allocations** | **300 / 300 Tickets** | Zero Overselling | 🟢 PASS (100% Accurate) |
+| **Successful Ticket Allocations** | **10,000 / 10,000 Tickets** | Zero Overselling | 🟢 PASS (100% Accurate) |
 
-> **Business Logic Validation:** Out of 238,171 reservation attempts under stock constraints (300 tickets available), exactly 300 transactions succeeded (`HTTP 202`), while 237,871 requests were gracefully rejected with `HTTP 409 Sold Out`.
+> **Business Logic Validation:** Out of 204,104 reservation attempts under stock constraints (10,000 tickets available), exactly 10,000 transactions succeeded (`HTTP 200/202`), while 194,104 requests were gracefully rejected with `HTTP 409 Sold Out` / stock exhaustion, proving absolute race-condition protection.
 
 ---
 
@@ -130,9 +131,10 @@ go run cmd/api/main.go
 ### 3. Execute Automated k6 Load Test
 
 ```bash
-# Pre-warm ticket inventory (e.g., 300 items) and clear stale queue data
-docker exec -it ticketpulse-redis redis-cli SET "event:11111111-1111-1111-1111-111111111111:zone:22222222-2222-2222-2222-222222222222:stock" 300
-docker exec -it ticketpulse-redis redis-cli DEL "event:11111111-1111-1111-1111-111111111111:queue"
+# Pre-warm ticket inventory (e.g., 10,000 items) and clear stale queue data
+curl -X POST http://localhost:8080/api/v1/tickets/warmup \
+  -H "Content-Type: application/json" \
+  -d '{"event_id":"11111111-1111-1111-1111-111111111111","zone_id":"22222222-2222-2222-2222-222222222222","stock":10000}'
 
 # Trigger k6 performance load script
 k6 run scripts/k6_load_test.js
