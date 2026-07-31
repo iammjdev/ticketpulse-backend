@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -51,6 +52,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ Failed to initialize Redis Repository: %v\n", err)
 	}
+
+	expirationWorker := worker.NewExpirationWorker(redisClient, redisRepo)
+	go expirationWorker.Start(ctx)
 
 	// 4. Initialize Kafka Producer & Worker Engine
 	kafkaBrokers := []string{"localhost:9092"}
@@ -171,6 +175,9 @@ func main() {
 		} else {
 			log.Printf("📢 Published OrderCreatedEvent to Kafka: OrderID=%s\n", orderID)
 		}
+
+		holdKey := fmt.Sprintf("hold:%s:%s:%d:%s", req.EventID, req.ZoneID, req.Quantity, req.UserID)
+		_ = redisClient.Set(c.Context(), holdKey, "HELD", 10*time.Minute).Err()
 
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 			"status":   "RESERVED",

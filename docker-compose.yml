@@ -21,6 +21,7 @@ services:
     container_name: ticketpulse-redis
     ports:
       - "6379:6379"
+    command: redis-server --notify-keyspace-events KEA
     volumes:
       - redis_data:/data
     healthcheck:
