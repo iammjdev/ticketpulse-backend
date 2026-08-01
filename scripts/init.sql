@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS users (
                         role user_role DEFAULT 'USER'::user_role NOT NULL,
                         member_tier VARCHAR(20) DEFAULT 'REGULAR' NOT NULL,
                         is_verified BOOLEAN DEFAULT FALSE NOT NULL,
+                        is_suspended BOOLEAN DEFAULT FALSE NOT NULL,
                         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
                         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
 );

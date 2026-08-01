@@ -20,6 +20,7 @@ type User struct {
 	Role         UserRole  `json:"role"`
 	MemberTier   string    `json:"member_tier"`
 	IsVerified   bool      `json:"is_verified"`
+	IsSuspended  bool      `json:"is_suspended"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

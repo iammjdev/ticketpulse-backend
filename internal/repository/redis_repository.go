@@ -32,6 +32,9 @@ type RedisRepository interface {
 	// caller won the claim. Used to throttle the resend-email endpoint to 1 request/60s/order
 	// without a DB round trip.
 	TryAcquireRateLimit(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	// TotalQueueLength sums the cardinality of every event's virtual-queue ZSET
+	// (event:*:queue) for the admin stats dashboard.
+	TotalQueueLength(ctx context.Context) (int64, error)
 }
 
 type redisRepository struct {
@@ -156,4 +159,29 @@ func (r *redisRepository) RestoreZoneStock(ctx context.Context, eventID, zoneID 
 
 func (r *redisRepository) TryAcquireRateLimit(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	return r.rdb.SetNX(ctx, key, "1", ttl).Result()
+}
+
+// TotalQueueLength scans for every event:*:queue ZSET and sums their cardinalities. Used by
+// the admin stats endpoint, which reports a platform-wide total rather than a per-event count.
+func (r *redisRepository) TotalQueueLength(ctx context.Context) (int64, error) {
+	var total int64
+	var cursor uint64
+	for {
+		keys, next, err := r.rdb.Scan(ctx, cursor, "event:*:queue", 100).Result()
+		if err != nil {
+			return 0, err
+		}
+		for _, key := range keys {
+			count, err := r.rdb.ZCard(ctx, key).Result()
+			if err != nil {
+				return 0, err
+			}
+			total += count
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return total, nil
 }

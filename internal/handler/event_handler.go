@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -168,4 +169,61 @@ func (h *EventHandler) CreateEvent(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"event": eventDetailResponse(event)})
+}
+
+func adminEventSummaryResponse(e *domain.AdminEventSummary) fiber.Map {
+	return fiber.Map{
+		"id":             e.ID,
+		"title":          e.Title,
+		"banner_url":     e.BannerURL,
+		"event_date":     e.EventDate,
+		"status":         e.Status,
+		"venue_name":     e.VenueName,
+		"venue_location": e.VenueLocation,
+		"total_capacity": e.TotalCapacity,
+		"tickets_sold":   e.TicketsSold,
+		"revenue":        e.Revenue,
+	}
+}
+
+func adminEventListResponse(events []*domain.AdminEventSummary, total, page, limit int) fiber.Map {
+	items := make([]fiber.Map, 0, len(events))
+	for _, e := range events {
+		items = append(items, adminEventSummaryResponse(e))
+	}
+	totalPages := 0
+	if limit > 0 {
+		totalPages = (total + limit - 1) / limit
+	}
+	return fiber.Map{
+		"events":      items,
+		"total":       total,
+		"page":        page,
+		"limit":       limit,
+		"total_pages": totalPages,
+	}
+}
+
+// AdminListEvents returns every event regardless of status, with sold-ticket-count and gross
+// revenue aggregated from paid orders, optionally filtered by status and paginated. ADMIN only.
+func (h *EventHandler) AdminListEvents(c *fiber.Ctx) error {
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+	filter := repository.AdminEventListFilter{
+		Status: strings.ToUpper(strings.TrimSpace(c.Query("status"))),
+		Page:   page,
+		Limit:  limit,
+	}
+
+	events, total, err := h.events.ListAdminEvents(c.Context(), filter)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch events"})
+	}
+
+	appliedPage := max(page, 1)
+	appliedLimit := limit
+	if appliedLimit < 1 || appliedLimit > 100 {
+		appliedLimit = 20
+	}
+	return c.JSON(adminEventListResponse(events, total, appliedPage, appliedLimit))
 }

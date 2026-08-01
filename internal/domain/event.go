@@ -51,3 +51,19 @@ type EventDetail struct {
 	Venue       Venue       `json:"venue"`
 	Zones       []Zone      `json:"zones"`
 }
+
+// AdminEventSummary is the list-view shape returned by GET /api/v1/admin/events. Unlike
+// EventSummary, TicketsSold/Revenue are aggregated from paid orders (the real source of
+// truth for sales), not the seed-time seat_zones.available_stock column.
+type AdminEventSummary struct {
+	ID            string      `json:"id"`
+	Title         string      `json:"title"`
+	BannerURL     string      `json:"banner_url"`
+	EventDate     time.Time   `json:"event_date"`
+	Status        EventStatus `json:"status"`
+	VenueName     string      `json:"venue_name"`
+	VenueLocation string      `json:"venue_location"`
+	TotalCapacity int         `json:"total_capacity"`
+	TicketsSold   int         `json:"tickets_sold"`
+	Revenue       float64     `json:"revenue"`
+}

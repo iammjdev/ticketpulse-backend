@@ -146,6 +146,9 @@ func main() {
 	newsService := service.NewNewsService(newsRepo, redisClient)
 	newsHandler := handler.NewNewsHandler(newsService)
 
+	userHandler := handler.NewUserHandler(userRepo)
+	adminHandler := handler.NewAdminHandler(orderRepo, redisRepo)
+
 	webhookSecret := getEnv("PAYMENT_WEBHOOK_SECRET", "dev_webhook_secret_change_me")
 	paymentService := service.NewPaymentService(orderRepo, redisRepo, userRepo, notificationProducer)
 	paymentHandler := handler.NewPaymentHandler(paymentService, orderRepo, webhookSecret)
@@ -244,11 +247,17 @@ func main() {
 		return c.JSON(fiber.Map{"status": "ok", "scope": "admin"})
 	})
 	admin.Post("/events", eventHandler.CreateEvent)
+	admin.Get("/events", eventHandler.AdminListEvents)
 
 	admin.Get("/news", newsHandler.AdminListNews)
 	admin.Post("/news", newsHandler.CreateNews)
 	admin.Put("/news/:id", newsHandler.UpdateNews)
 	admin.Delete("/news/:id", newsHandler.DeleteNews)
+
+	admin.Get("/users", userHandler.AdminListUsers)
+	admin.Patch("/users/:id/role", userHandler.AdminUpdateUser)
+
+	admin.Get("/stats", adminHandler.Stats)
 
 	// Dev tool: applies the exact success side effects of a real gateway webhook without
 	// needing PAYMENT_WEBHOOK_SECRET on the frontend. See /admin/payment-simulator.

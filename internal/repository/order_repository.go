@@ -30,6 +30,9 @@ type OrderRepository interface {
 	// had already left PENDING (paid, or cancelled by a prior call) — callers use that to
 	// avoid double-restoring Redis stock.
 	CancelIfPending(ctx context.Context, id string) (order *domain.Order, wasCancelled bool, err error)
+	// AdminStats aggregates gross revenue and tickets sold across every paid order
+	// (COMPLETED or CHECKED_IN), platform-wide, for the admin stats dashboard.
+	AdminStats(ctx context.Context) (revenue float64, ticketsSold int, err error)
 }
 
 type orderRepository struct {
@@ -166,6 +169,16 @@ func (r *orderRepository) CancelIfPending(ctx context.Context, id string) (*doma
 		return nil, false, err
 	}
 	return order, tag.RowsAffected() > 0, nil
+}
+
+func (r *orderRepository) AdminStats(ctx context.Context) (revenue float64, ticketsSold int, err error) {
+	query := `
+		SELECT COALESCE(SUM(total_amount), 0), COALESCE(SUM(quantity), 0)
+		FROM orders
+		WHERE status IN ('COMPLETED', 'CHECKED_IN')
+	`
+	err = r.db.QueryRow(ctx, query).Scan(&revenue, &ticketsSold)
+	return revenue, ticketsSold, err
 }
 
 func scanOrder(row pgx.Row) (*domain.Order, error) {

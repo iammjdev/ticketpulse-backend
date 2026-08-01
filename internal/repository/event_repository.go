@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,6 +20,13 @@ type NewZone struct {
 	TotalCapacity int
 }
 
+// AdminEventListFilter narrows GET /admin/events queries.
+type AdminEventListFilter struct {
+	Status string
+	Page   int
+	Limit  int
+}
+
 type EventRepository interface {
 	// RequiresIDVerification reports whether an event demands a national ID / passport
 	// on file before reservation. Events without a matching row (e.g. not yet synced to
@@ -31,6 +39,9 @@ type EventRepository interface {
 	// e-ticket email rendering. Returns "" (no error) if zoneID doesn't match a row — orders
 	// created via the /tickets/reserve dev fallback path may carry a placeholder zone id.
 	FindZoneName(ctx context.Context, zoneID string) (string, error)
+	// ListAdminEvents returns every event regardless of status, with sold-ticket-count and
+	// gross-revenue aggregated from paid orders (not the seed-time seat_zones column).
+	ListAdminEvents(ctx context.Context, filter AdminEventListFilter) ([]*domain.AdminEventSummary, int, error)
 }
 
 type eventRepository struct {
@@ -192,4 +203,73 @@ func (r *eventRepository) CreateEventWithZones(
 	}
 
 	return r.FindEventByID(ctx, eventID)
+}
+
+func (r *eventRepository) ListAdminEvents(ctx context.Context, filter AdminEventListFilter) ([]*domain.AdminEventSummary, int, error) {
+	page := max(filter.Page, 1)
+	limit := filter.Limit
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	where := "WHERE 1 = 1"
+	args := []any{}
+	argN := 0
+	nextArg := func(v any) string {
+		argN++
+		args = append(args, v)
+		return "$" + strconv.Itoa(argN)
+	}
+
+	if filter.Status != "" {
+		where += " AND e.status = " + nextArg(filter.Status)
+	}
+
+	var total int
+	if err := r.db.QueryRow(ctx, "SELECT count(*) FROM events e "+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	limitArg := nextArg(limit)
+	offsetArg := nextArg(offset)
+	query := `
+		SELECT e.id, e.title, e.poster_url, e.event_date, e.status, v.name, v.address,
+		       COALESCE(zt.total_capacity, 0), COALESCE(ot.tickets_sold, 0), COALESCE(ot.revenue, 0)
+		FROM events e
+		JOIN venues v ON e.venue_id = v.id
+		LEFT JOIN (
+			SELECT event_id, SUM(total_capacity) AS total_capacity
+			FROM seat_zones GROUP BY event_id
+		) zt ON zt.event_id = e.id
+		LEFT JOIN (
+			SELECT event_id, SUM(quantity) AS tickets_sold, SUM(total_amount) AS revenue
+			FROM orders WHERE status IN ('COMPLETED', 'CHECKED_IN') GROUP BY event_id
+		) ot ON ot.event_id = e.id
+	` + where + `
+		ORDER BY e.event_date DESC
+		LIMIT ` + limitArg + ` OFFSET ` + offsetArg
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	events := make([]*domain.AdminEventSummary, 0)
+	for rows.Next() {
+		var e domain.AdminEventSummary
+		var bannerURL *string
+		if err := rows.Scan(
+			&e.ID, &e.Title, &bannerURL, &e.EventDate, &e.Status, &e.VenueName, &e.VenueLocation,
+			&e.TotalCapacity, &e.TicketsSold, &e.Revenue,
+		); err != nil {
+			return nil, 0, err
+		}
+		if bannerURL != nil {
+			e.BannerURL = *bannerURL
+		}
+		events = append(events, &e)
+	}
+	return events, total, rows.Err()
 }
