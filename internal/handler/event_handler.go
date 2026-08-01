@@ -227,3 +227,106 @@ func (h *EventHandler) AdminListEvents(c *fiber.Ctx) error {
 	}
 	return c.JSON(adminEventListResponse(events, total, appliedPage, appliedLimit))
 }
+
+type updateZonesRequest struct {
+	Zones []createZoneRequest `json:"zones"`
+}
+
+// UpdateZones upserts an event's ticket zones (matched by name) and pre-warms each zone's
+// Redis stock counter to the new total_capacity, mirroring CreateEvent's warmup step. Existing
+// zones not in the request body are left untouched — zones are never deleted here since
+// tickets FK to seat_zones. ADMIN only.
+func (h *EventHandler) UpdateZones(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+
+	var req updateZonesRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	if len(req.Zones) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "At least one zone is required"})
+	}
+
+	zones := make([]repository.NewZone, 0, len(req.Zones))
+	for _, z := range req.Zones {
+		zoneType := strings.ToUpper(strings.TrimSpace(z.Type))
+		if zoneType != "STANDING" {
+			zoneType = "SEATED"
+		}
+		if strings.TrimSpace(z.Name) == "" || z.Price < 0 || z.TotalCapacity <= 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Each zone needs a name, a non-negative price, and a positive total_capacity"})
+		}
+		zones = append(zones, repository.NewZone{
+			Name:          strings.TrimSpace(z.Name),
+			Type:          zoneType,
+			Price:         z.Price,
+			TotalCapacity: z.TotalCapacity,
+		})
+	}
+
+	updated, err := h.events.UpdateEventZones(c.Context(), eventID, zones)
+	if err != nil {
+		if errors.Is(err, repository.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update zones"})
+	}
+
+	for _, z := range updated {
+		if err := h.redis.WarmupStock(c.Context(), eventID, z.ID, z.TotalCapacity); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Zones updated, but failed to pre-warm Redis stock",
+				"zones":   updated,
+				"details": err.Error(),
+			})
+		}
+	}
+
+	zonesResponse := make([]fiber.Map, 0, len(updated))
+	for _, z := range updated {
+		zonesResponse = append(zonesResponse, zoneResponse(z))
+	}
+	return c.JSON(fiber.Map{"zones": zonesResponse})
+}
+
+type updateEventStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// UpdateEventStatus transitions an event through its lifecycle (PRE_WAITING/LIVE/ENDED, or
+// back to UPCOMING) in PostgreSQL and mirrors the value into the Redis event:{id}:status key
+// that queue/reservation code paths read for fast, DB-free status checks. ADMIN only.
+func (h *EventHandler) UpdateEventStatus(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+
+	var req updateEventStatusRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	status := domain.EventStatus(strings.ToUpper(strings.TrimSpace(req.Status)))
+	switch status {
+	case domain.EventUpcoming, domain.EventPreWaiting, domain.EventLive, domain.EventEnded:
+		// valid
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be one of UPCOMING, PRE_WAITING, LIVE, ENDED"})
+	}
+
+	event, err := h.events.UpdateEventStatus(c.Context(), eventID, status)
+	if err != nil {
+		if errors.Is(err, repository.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update event status"})
+	}
+
+	if err := h.redis.SetEventStatus(c.Context(), eventID, string(status)); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error":   "Event status updated in database, but failed to sync Redis",
+			"event":   eventDetailResponse(event),
+			"details": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{"event": eventDetailResponse(event)})
+}

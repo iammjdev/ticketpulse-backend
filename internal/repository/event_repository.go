@@ -42,6 +42,13 @@ type EventRepository interface {
 	// ListAdminEvents returns every event regardless of status, with sold-ticket-count and
 	// gross-revenue aggregated from paid orders (not the seed-time seat_zones column).
 	ListAdminEvents(ctx context.Context, filter AdminEventListFilter) ([]*domain.AdminEventSummary, int, error)
+	// UpdateEventZones upserts the given zones for eventID (matched by zone_name, which is
+	// unique per event) inside a single transaction. Zones not present in the caller's list
+	// are left untouched — this never deletes a zone, since tickets FK to seat_zones and a
+	// delete would cascade. Returns the event's full zone list after the upsert.
+	UpdateEventZones(ctx context.Context, eventID string, zones []NewZone) ([]domain.Zone, error)
+	// UpdateEventStatus transitions an event to a new lifecycle status. ADMIN only.
+	UpdateEventStatus(ctx context.Context, eventID string, status domain.EventStatus) (*domain.EventDetail, error)
 }
 
 type eventRepository struct {
@@ -272,4 +279,40 @@ func (r *eventRepository) ListAdminEvents(ctx context.Context, filter AdminEvent
 		events = append(events, &e)
 	}
 	return events, total, rows.Err()
+}
+
+func (r *eventRepository) UpdateEventZones(ctx context.Context, eventID string, zones []NewZone) ([]domain.Zone, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	for _, z := range zones {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO seat_zones (event_id, zone_name, seat_type, price, total_capacity, available_stock)
+			VALUES ($1, $2, $3, $4, $5, $5)
+			ON CONFLICT (event_id, zone_name) DO UPDATE
+			SET seat_type = EXCLUDED.seat_type, price = EXCLUDED.price, total_capacity = EXCLUDED.total_capacity
+		`, eventID, z.Name, z.Type, z.Price, z.TotalCapacity); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return r.findZonesByEventID(ctx, eventID)
+}
+
+func (r *eventRepository) UpdateEventStatus(ctx context.Context, eventID string, status domain.EventStatus) (*domain.EventDetail, error) {
+	tag, err := r.db.Exec(ctx, `UPDATE events SET status = $2, updated_at = NOW() WHERE id = $1`, eventID, status)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrEventNotFound
+	}
+	return r.FindEventByID(ctx, eventID)
 }

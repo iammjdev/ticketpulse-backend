@@ -248,6 +248,8 @@ func main() {
 	})
 	admin.Post("/events", eventHandler.CreateEvent)
 	admin.Get("/events", eventHandler.AdminListEvents)
+	admin.Put("/events/:id/zones", eventHandler.UpdateZones)
+	admin.Post("/events/:id/status", eventHandler.UpdateEventStatus)
 
 	admin.Get("/news", newsHandler.AdminListNews)
 	admin.Post("/news", newsHandler.CreateNews)
@@ -256,6 +258,8 @@ func main() {
 
 	admin.Get("/users", userHandler.AdminListUsers)
 	admin.Patch("/users/:id/role", userHandler.AdminUpdateUser)
+
+	admin.Get("/orders", orderHandler.AdminListOrders)
 
 	admin.Get("/stats", adminHandler.Stats)
 

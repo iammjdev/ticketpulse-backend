@@ -28,9 +28,15 @@ func (h *AdminHandler) Stats(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to compute queue length"})
 	}
 
+	activeHolds, err := h.redis.GetActiveHoldCount(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to compute active holds"})
+	}
+
 	return c.JSON(fiber.Map{
 		"gross_revenue":       revenue,
 		"tickets_sold":        ticketsSold,
 		"active_queue_length": queueLength,
+		"active_holds":        activeHolds,
 	})
 }

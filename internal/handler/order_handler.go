@@ -2,6 +2,8 @@ package handler
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -143,4 +145,75 @@ func (h *OrderHandler) ResendEmail(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"message": "E-ticket email resend queued", "order_id": orderID})
+}
+
+func adminOrderSummaryResponse(o *domain.AdminOrderSummary) fiber.Map {
+	return fiber.Map{
+		"id":             o.ID,
+		"user_id":        o.UserID,
+		"user_email":     o.UserEmail,
+		"user_full_name": o.UserFullName,
+		"event_id":       o.EventID,
+		"event_title":    o.EventTitle,
+		"zone_id":        o.ZoneID,
+		"quantity":       o.Quantity,
+		"total_amount":   o.TotalAmount,
+		"status":         o.Status,
+		"created_at":     o.CreatedAt,
+		"checked_in_at":  o.CheckedInAt,
+	}
+}
+
+func adminOrderListResponse(orders []*domain.AdminOrderSummary, total, page, limit int) fiber.Map {
+	items := make([]fiber.Map, 0, len(orders))
+	for _, o := range orders {
+		items = append(items, adminOrderSummaryResponse(o))
+	}
+	totalPages := 0
+	if limit > 0 {
+		totalPages = (total + limit - 1) / limit
+	}
+	return fiber.Map{
+		"orders":      items,
+		"total":       total,
+		"page":        page,
+		"limit":       limit,
+		"total_pages": totalPages,
+	}
+}
+
+// validAdminOrderStatuses are the order_status enum values accepted as a ?status filter.
+var validAdminOrderStatuses = map[string]bool{
+	string(domain.OrderPending):   true,
+	string(domain.OrderCompleted): true,
+	string(domain.OrderCheckedIn): true,
+	string(domain.OrderCancelled): true,
+	string(domain.OrderExpired):   true,
+}
+
+// AdminListOrders returns every order platform-wide, joined with the placing user and event,
+// optionally filtered by status and paginated. ADMIN only.
+func (h *OrderHandler) AdminListOrders(c *fiber.Ctx) error {
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+
+	filter := repository.AdminOrderListFilter{Page: page, Limit: limit}
+	if statusParam := strings.ToUpper(strings.TrimSpace(c.Query("status"))); statusParam != "" {
+		if !validAdminOrderStatuses[statusParam] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid status filter"})
+		}
+		filter.Status = statusParam
+	}
+
+	orders, total, err := h.orders.ListAdminOrders(c.Context(), filter)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch orders"})
+	}
+
+	appliedPage := max(page, 1)
+	appliedLimit := limit
+	if appliedLimit < 1 || appliedLimit > 100 {
+		appliedLimit = 20
+	}
+	return c.JSON(adminOrderListResponse(orders, total, appliedPage, appliedLimit))
 }

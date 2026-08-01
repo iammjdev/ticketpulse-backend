@@ -35,6 +35,12 @@ type RedisRepository interface {
 	// TotalQueueLength sums the cardinality of every event's virtual-queue ZSET
 	// (event:*:queue) for the admin stats dashboard.
 	TotalQueueLength(ctx context.Context) (int64, error)
+	// GetActiveHoldCount counts live order:expire:* keys — the 10-minute payment-hold timers
+	// armed by SetOrderExpiry — for the admin stats dashboard.
+	GetActiveHoldCount(ctx context.Context) (int64, error)
+	// SetEventStatus mirrors an event's lifecycle status into event:{id}:status so hot-path
+	// reservation/queue code can check it without a Postgres round trip.
+	SetEventStatus(ctx context.Context, eventID, status string) error
 }
 
 type redisRepository struct {
@@ -178,6 +184,30 @@ func (r *redisRepository) TotalQueueLength(ctx context.Context) (int64, error) {
 			}
 			total += count
 		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return total, nil
+}
+
+func (r *redisRepository) SetEventStatus(ctx context.Context, eventID, status string) error {
+	key := fmt.Sprintf("event:%s:status", eventID)
+	return r.rdb.Set(ctx, key, status, 0).Err()
+}
+
+// GetActiveHoldCount scans for every order:expire:* key (armed by SetOrderExpiry, cleared by
+// ClearOrderExpiry) and returns how many are still live, i.e. orders with an unpaid stock hold.
+func (r *redisRepository) GetActiveHoldCount(ctx context.Context) (int64, error) {
+	var total int64
+	var cursor uint64
+	for {
+		keys, next, err := r.rdb.Scan(ctx, cursor, "order:expire:*", 100).Result()
+		if err != nil {
+			return 0, err
+		}
+		total += int64(len(keys))
 		cursor = next
 		if cursor == 0 {
 			break
