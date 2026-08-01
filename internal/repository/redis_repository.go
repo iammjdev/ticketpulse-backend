@@ -15,6 +15,19 @@ type RedisRepository interface {
 	EnqueueUser(ctx context.Context, eventID, userID string) (int64, error)
 	GetQueuePosition(ctx context.Context, eventID, userID string) (int64, error)
 	DequeueUser(ctx context.Context, eventID string, userID string) error
+
+	// SetOrderExpiry arms the order:expire:{orderID} TTL key that the ExpirationWorker
+	// listens for via Redis keyspace notifications — its expiry is what actually triggers
+	// the unpaid-order cancellation, not a periodic DB scan.
+	SetOrderExpiry(ctx context.Context, orderID string, ttl time.Duration) error
+	// ClearOrderExpiry disarms the timer once an order is paid, so it never fires.
+	ClearOrderExpiry(ctx context.Context, orderID string) error
+	// OrderExpiryTTL reports seconds remaining on the timer (0 if missing/already fired) so
+	// the frontend countdown can stay synced to the value that actually governs cancellation.
+	OrderExpiryTTL(ctx context.Context, orderID string) (time.Duration, error)
+	// RestoreZoneStock increments the same stock counter ReserveTicket decrements, undoing a
+	// reservation whose order expired unpaid or was cancelled.
+	RestoreZoneStock(ctx context.Context, eventID, zoneID string, quantity int) error
 }
 
 type redisRepository struct {
@@ -106,4 +119,33 @@ func (r *redisRepository) GetQueuePosition(ctx context.Context, eventID, userID 
 func (r *redisRepository) DequeueUser(ctx context.Context, eventID string, userID string) error {
 	queueKey := fmt.Sprintf("event:%s:queue", eventID)
 	return r.rdb.ZRem(ctx, queueKey, userID).Err()
+}
+
+func orderExpireKey(orderID string) string {
+	return fmt.Sprintf("order:expire:%s", orderID)
+}
+
+func (r *redisRepository) SetOrderExpiry(ctx context.Context, orderID string, ttl time.Duration) error {
+	return r.rdb.Set(ctx, orderExpireKey(orderID), "1", ttl).Err()
+}
+
+func (r *redisRepository) ClearOrderExpiry(ctx context.Context, orderID string) error {
+	return r.rdb.Del(ctx, orderExpireKey(orderID)).Err()
+}
+
+func (r *redisRepository) OrderExpiryTTL(ctx context.Context, orderID string) (time.Duration, error) {
+	ttl, err := r.rdb.TTL(ctx, orderExpireKey(orderID)).Result()
+	if err != nil {
+		return 0, err
+	}
+	// -1 = key exists without expiry (shouldn't happen here), -2 = key missing entirely.
+	if ttl < 0 {
+		return 0, nil
+	}
+	return ttl, nil
+}
+
+func (r *redisRepository) RestoreZoneStock(ctx context.Context, eventID, zoneID string, quantity int) error {
+	key := fmt.Sprintf("event:%s:zone:%s:stock", eventID, zoneID)
+	return r.rdb.IncrBy(ctx, key, int64(quantity)).Err()
 }

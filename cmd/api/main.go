@@ -83,7 +83,9 @@ func main() {
 		log.Fatalf("❌ Failed to initialize Redis Repository: %v\n", err)
 	}
 
-	expirationWorker := worker.NewExpirationWorker(redisClient, redisRepo)
+	orderRepo := repository.NewOrderRepository(dbPool)
+
+	expirationWorker := worker.NewExpirationWorker(redisClient, redisRepo, orderRepo)
 	go expirationWorker.Start(ctx)
 
 	// 4. Initialize Kafka Producer & Worker Engine
@@ -105,7 +107,7 @@ func main() {
 	})
 
 	// Initialize & Run Order Processing Worker in Background Goroutine
-	orderWorker := worker.NewOrderWorker(kafkaBrokers, kafkaTopic, "order-worker-group", dbPool)
+	orderWorker := worker.NewOrderWorker(kafkaBrokers, kafkaTopic, "order-worker-group", dbPool, redisRepo)
 	go orderWorker.Start(ctx)
 
 	// 5. Initialize Handlers
@@ -116,7 +118,6 @@ func main() {
 	authHandler := handler.NewAuthHandler(authService)
 
 	eventRepo := repository.NewEventRepository(dbPool)
-	orderRepo := repository.NewOrderRepository(dbPool)
 	orderHandler := handler.NewOrderHandler(orderRepo, userRepo)
 	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, redisRepo)
@@ -124,6 +125,10 @@ func main() {
 	newsRepo := repository.NewNewsRepository(dbPool)
 	newsService := service.NewNewsService(newsRepo, redisClient)
 	newsHandler := handler.NewNewsHandler(newsService)
+
+	webhookSecret := getEnv("PAYMENT_WEBHOOK_SECRET", "dev_webhook_secret_change_me")
+	paymentService := service.NewPaymentService(orderRepo, redisRepo)
+	paymentHandler := handler.NewPaymentHandler(paymentService, orderRepo, webhookSecret)
 
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
@@ -194,6 +199,13 @@ func main() {
 
 	// Order History Endpoints
 	app.Get("/api/v1/orders/my-orders", authmw.JWTMiddleware, orderHandler.GetMyOrders)
+	app.Get("/api/v1/orders/:id/status", authmw.JWTMiddleware, paymentHandler.GetOrderStatus)
+
+	// Payment Endpoints
+	app.Post("/api/v1/payments/charge", authmw.JWTMiddleware, paymentHandler.CreateCharge)
+	// Gateway-signed webhook — HMAC-verified inside the handler itself, not JWT-gated (the
+	// caller is the payment gateway, not a logged-in user).
+	app.Post("/api/v1/payments/webhook", paymentHandler.HandleWebhook)
 
 	// Gate Verification Endpoint (ADMIN or GATE_STAFF)
 	app.Post("/api/v1/tickets/verify", authmw.JWTMiddleware, authmw.RequireAnyRole(string(domain.RoleAdmin), string(domain.RoleGateStaff)), orderHandler.VerifyTicket)
@@ -209,6 +221,10 @@ func main() {
 	admin.Post("/news", newsHandler.CreateNews)
 	admin.Put("/news/:id", newsHandler.UpdateNews)
 	admin.Delete("/news/:id", newsHandler.DeleteNews)
+
+	// Dev tool: applies the exact success side effects of a real gateway webhook without
+	// needing PAYMENT_WEBHOOK_SECRET on the frontend. See /admin/payment-simulator.
+	admin.Post("/payments/simulate/:orderId", paymentHandler.SimulatePayment)
 
 	// Graceful Shutdown Setup
 	sigChan := make(chan os.Signal, 1)

@@ -21,6 +21,15 @@ var (
 type OrderRepository interface {
 	FindOrdersByUserID(ctx context.Context, userID string) ([]*domain.Order, error)
 	VerifyAndCheckInTicket(ctx context.Context, orderID string) (*domain.Order, error)
+	FindByID(ctx context.Context, id string) (*domain.Order, error)
+	// MarkPaid transitions PENDING -> COMPLETED. Idempotent: re-calling on an already-paid
+	// order is a no-op that just returns its current (already COMPLETED) state, so a retried
+	// webhook delivery never errors.
+	MarkPaid(ctx context.Context, id string) (*domain.Order, error)
+	// CancelIfPending transitions PENDING -> CANCELLED. wasCancelled is false when the order
+	// had already left PENDING (paid, or cancelled by a prior call) — callers use that to
+	// avoid double-restoring Redis stock.
+	CancelIfPending(ctx context.Context, id string) (order *domain.Order, wasCancelled bool, err error)
 }
 
 type orderRepository struct {
@@ -115,6 +124,48 @@ func (r *orderRepository) VerifyAndCheckInTicket(ctx context.Context, orderID st
 	default:
 		return &o2, ErrOrderNotEligible
 	}
+}
+
+func (r *orderRepository) FindByID(ctx context.Context, id string) (*domain.Order, error) {
+	query := `
+		SELECT o.id, o.user_id, o.event_id, e.title, v.name, e.event_date, e.poster_url,
+		       o.zone_id, o.quantity, o.total_amount, o.status, o.created_at, o.checked_in_at
+		FROM orders o
+		JOIN events e ON o.event_id = e.id
+		JOIN venues v ON e.venue_id = v.id
+		WHERE o.id = $1
+	`
+	o, err := scanOrder(r.db.QueryRow(ctx, query, id))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrOrderNotFound
+		}
+		return nil, err
+	}
+	return o, nil
+}
+
+func (r *orderRepository) MarkPaid(ctx context.Context, id string) (*domain.Order, error) {
+	if _, err := r.db.Exec(ctx, `
+		UPDATE orders SET status = 'COMPLETED', updated_at = NOW() WHERE id = $1 AND status = 'PENDING'
+	`, id); err != nil {
+		return nil, err
+	}
+	return r.FindByID(ctx, id)
+}
+
+func (r *orderRepository) CancelIfPending(ctx context.Context, id string) (*domain.Order, bool, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE orders SET status = 'CANCELLED', updated_at = NOW() WHERE id = $1 AND status = 'PENDING'
+	`, id)
+	if err != nil {
+		return nil, false, err
+	}
+	order, err := r.FindByID(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return order, tag.RowsAffected() > 0, nil
 }
 
 func scanOrder(row pgx.Row) (*domain.Order, error) {
