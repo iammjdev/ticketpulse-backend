@@ -28,6 +28,10 @@ type RedisRepository interface {
 	// RestoreZoneStock increments the same stock counter ReserveTicket decrements, undoing a
 	// reservation whose order expired unpaid or was cancelled.
 	RestoreZoneStock(ctx context.Context, eventID, zoneID string, quantity int) error
+	// TryAcquireRateLimit atomically claims key for ttl (SET NX) and reports whether the
+	// caller won the claim. Used to throttle the resend-email endpoint to 1 request/60s/order
+	// without a DB round trip.
+	TryAcquireRateLimit(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
 
 type redisRepository struct {
@@ -148,4 +152,8 @@ func (r *redisRepository) OrderExpiryTTL(ctx context.Context, orderID string) (t
 func (r *redisRepository) RestoreZoneStock(ctx context.Context, eventID, zoneID string, quantity int) error {
 	key := fmt.Sprintf("event:%s:zone:%s:stock", eventID, zoneID)
 	return r.rdb.IncrBy(ctx, key, int64(quantity)).Err()
+}
+
+func (r *redisRepository) TryAcquireRateLimit(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	return r.rdb.SetNX(ctx, key, "1", ttl).Result()
 }

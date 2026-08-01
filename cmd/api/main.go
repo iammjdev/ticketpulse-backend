@@ -17,7 +17,9 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/iammjdev/ticketpulse-backend/internal/config"
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
+	"github.com/iammjdev/ticketpulse-backend/internal/event"
 	"github.com/iammjdev/ticketpulse-backend/internal/handler"
 	authmw "github.com/iammjdev/ticketpulse-backend/internal/middleware"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
@@ -110,6 +112,25 @@ func main() {
 	orderWorker := worker.NewOrderWorker(kafkaBrokers, kafkaTopic, "order-worker-group", dbPool, redisRepo)
 	go orderWorker.Start(ctx)
 
+	// 4b. Initialize Kafka Producer & Consumer Worker for Async E-Ticket Notifications.
+	// Construction never fails even if Kafka is offline — kafka-go dials lazily on first
+	// read/write, so publishing/consuming degrade gracefully instead of blocking startup.
+	kafkaCfg := config.LoadKafkaConfig()
+	notificationProducer := event.NewProducer(kafkaCfg.Brokers, kafkaCfg.OrderPaidTopic)
+	defer notificationProducer.Close()
+
+	// Pre-warm the ticketpulse.order.paid topic (same reasoning as the order.created pre-warm
+	// above): without this, the NotificationWorker's consumer group can start before the topic
+	// exists and miss the first real publish while Kafka lazily creates it.
+	_ = notificationProducer.PublishOrderPaid(ctx, event.OrderPaidEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+
+	smtpCfg := config.LoadSMTPConfig()
+	if smtpCfg.Enabled {
+		log.Printf("📧 SMTP configured (%s:%s) — e-ticket emails will be sent for real\n", smtpCfg.Host, smtpCfg.Port)
+	} else {
+		log.Println("📧 SMTP_HOST not set — e-ticket emails will be logged to stdout instead of sent")
+	}
+
 	// 5. Initialize Handlers
 	queueHandler := handler.NewQueueHandler(redisRepo)
 
@@ -118,7 +139,6 @@ func main() {
 	authHandler := handler.NewAuthHandler(authService)
 
 	eventRepo := repository.NewEventRepository(dbPool)
-	orderHandler := handler.NewOrderHandler(orderRepo, userRepo)
 	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, redisRepo)
 
@@ -127,8 +147,15 @@ func main() {
 	newsHandler := handler.NewNewsHandler(newsService)
 
 	webhookSecret := getEnv("PAYMENT_WEBHOOK_SECRET", "dev_webhook_secret_change_me")
-	paymentService := service.NewPaymentService(orderRepo, redisRepo)
+	paymentService := service.NewPaymentService(orderRepo, redisRepo, userRepo, notificationProducer)
 	paymentHandler := handler.NewPaymentHandler(paymentService, orderRepo, webhookSecret)
+	orderHandler := handler.NewOrderHandler(orderRepo, userRepo, redisRepo, paymentService)
+
+	notificationWorker := worker.NewNotificationWorker(
+		kafkaCfg.Brokers, kafkaCfg.OrderPaidTopic, "notification-worker-group",
+		orderRepo, eventRepo, userRepo, smtpCfg,
+	)
+	go notificationWorker.Start(ctx)
 
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
@@ -200,6 +227,7 @@ func main() {
 	// Order History Endpoints
 	app.Get("/api/v1/orders/my-orders", authmw.JWTMiddleware, orderHandler.GetMyOrders)
 	app.Get("/api/v1/orders/:id/status", authmw.JWTMiddleware, paymentHandler.GetOrderStatus)
+	app.Post("/api/v1/orders/:id/resend-email", authmw.JWTMiddleware, orderHandler.ResendEmail)
 
 	// Payment Endpoints
 	app.Post("/api/v1/payments/charge", authmw.JWTMiddleware, paymentHandler.CreateCharge)

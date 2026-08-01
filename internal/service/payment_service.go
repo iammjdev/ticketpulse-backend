@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
+	"github.com/iammjdev/ticketpulse-backend/internal/event"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
 )
 
@@ -31,12 +33,14 @@ type ChargeResult struct {
 // creation, HMAC-verified webhook confirmation, and Redis-synced expiry — mirrors a real one
 // closely enough to demo end-to-end.
 type PaymentService struct {
-	orders repository.OrderRepository
-	redis  repository.RedisRepository
+	orders   repository.OrderRepository
+	redis    repository.RedisRepository
+	users    repository.UserRepository
+	notifier *event.Producer
 }
 
-func NewPaymentService(orders repository.OrderRepository, redis repository.RedisRepository) *PaymentService {
-	return &PaymentService{orders: orders, redis: redis}
+func NewPaymentService(orders repository.OrderRepository, redis repository.RedisRepository, users repository.UserRepository, notifier *event.Producer) *PaymentService {
+	return &PaymentService{orders: orders, redis: redis, users: users, notifier: notifier}
 }
 
 // CreateCharge issues a simulated charge for a pending order. Its expiry is read straight
@@ -92,8 +96,49 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, orderID string) (*d
 	}
 	if order.Status == domain.OrderCompleted {
 		_ = s.redis.ClearOrderExpiry(ctx, orderID)
+		s.publishOrderPaid(ctx, order)
 	}
 	return order, nil
+}
+
+// ResendNotification re-publishes ORDER_PAID for an already-paid order, triggering the
+// notification worker to send another copy of the e-ticket email. Used by the
+// /orders/:id/resend-email endpoint; rate limiting is the caller's responsibility.
+func (s *PaymentService) ResendNotification(ctx context.Context, orderID string) (*domain.Order, error) {
+	order, err := s.orders.FindByID(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if order.Status != domain.OrderCompleted {
+		return nil, ErrOrderNotPayable
+	}
+	s.publishOrderPaid(ctx, order)
+	return order, nil
+}
+
+// publishOrderPaid best-effort emits the ORDER_PAID Kafka event. Failure (including Kafka
+// being offline in dev) is logged and swallowed — email delivery is a downstream concern and
+// must never fail the payment confirmation or resend request that triggered it.
+func (s *PaymentService) publishOrderPaid(ctx context.Context, order *domain.Order) {
+	email := ""
+	if u, err := s.users.FindByID(ctx, order.UserID); err == nil {
+		email = u.Email
+	} else {
+		log.Printf("⚠️ Could not resolve email for user %s (order %s): %v\n", order.UserID, order.ID, err)
+	}
+
+	evt := event.OrderPaidEvent{
+		EventType:  "ORDER_PAID",
+		OrderID:    order.ID,
+		UserID:     order.UserID,
+		Email:      email,
+		EventTitle: order.EventTitle,
+		Amount:     order.TotalAmount,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := s.notifier.PublishOrderPaid(ctx, evt); err != nil {
+		log.Printf("⚠️ Failed to publish ORDER_PAID event for order %s (Kafka may be offline): %v\n", order.ID, err)
+	}
 }
 
 // OrderExpiryTTL exposes the live Redis countdown for the order-status polling endpoint.

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -10,13 +11,19 @@ import (
 	"github.com/iammjdev/ticketpulse-backend/internal/service"
 )
 
+// resendEmailCooldown is the minimum interval between resend-email requests for a single
+// order, enforced via Redis SETNX so it holds across multiple API instances.
+const resendEmailCooldown = 60 * time.Second
+
 type OrderHandler struct {
-	orders repository.OrderRepository
-	users  repository.UserRepository
+	orders   repository.OrderRepository
+	users    repository.UserRepository
+	redis    repository.RedisRepository
+	payments *service.PaymentService
 }
 
-func NewOrderHandler(orders repository.OrderRepository, users repository.UserRepository) *OrderHandler {
-	return &OrderHandler{orders: orders, users: users}
+func NewOrderHandler(orders repository.OrderRepository, users repository.UserRepository, redis repository.RedisRepository, payments *service.PaymentService) *OrderHandler {
+	return &OrderHandler{orders: orders, users: users, redis: redis, payments: payments}
 }
 
 func orderResponse(o *domain.Order) fiber.Map {
@@ -101,4 +108,39 @@ func (h *OrderHandler) VerifyTicket(c *fiber.Ctx) error {
 		"checked_in_at": order.CheckedInAt,
 		"status":        order.Status,
 	})
+}
+
+// ResendEmail re-triggers the e-ticket notification for a PAID order by re-publishing
+// ORDER_PAID to Kafka. Requires the caller to own the order (or be ADMIN) and be PAID
+// (COMPLETED); rate limited to 1 request/60s/order via Redis SETNX.
+func (h *OrderHandler) ResendEmail(c *fiber.Ctx) error {
+	orderID := c.Params("id")
+
+	order, err := h.orders.FindByID(c.Context(), orderID)
+	if err != nil {
+		if errors.Is(err, repository.ErrOrderNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Order not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch order"})
+	}
+	if !ownsOrder(c, order) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Not your order"})
+	}
+	if order.Status != domain.OrderCompleted {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Order is not paid yet — nothing to resend"})
+	}
+
+	allowed, err := h.redis.TryAcquireRateLimit(c.Context(), "resend_email:"+orderID, resendEmailCooldown)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to check rate limit"})
+	}
+	if !allowed {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "Please wait a minute before requesting another resend"})
+	}
+
+	if _, err := h.payments.ResendNotification(c.Context(), orderID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to queue e-ticket resend"})
+	}
+
+	return c.JSON(fiber.Map{"message": "E-ticket email resend queued", "order_id": orderID})
 }

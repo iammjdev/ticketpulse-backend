@@ -27,6 +27,10 @@ type EventRepository interface {
 	ListActiveEvents(ctx context.Context) ([]*domain.EventSummary, error)
 	FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error)
 	CreateEventWithZones(ctx context.Context, venueID, title, description, bannerURL string, eventDate string, status domain.EventStatus, zones []NewZone) (*domain.EventDetail, error)
+	// FindZoneName resolves a seat_zones.id to its display name (e.g. "VIP Standing") for
+	// e-ticket email rendering. Returns "" (no error) if zoneID doesn't match a row — orders
+	// created via the /tickets/reserve dev fallback path may carry a placeholder zone id.
+	FindZoneName(ctx context.Context, zoneID string) (string, error)
 }
 
 type eventRepository struct {
@@ -137,6 +141,18 @@ func (r *eventRepository) findZonesByEventID(ctx context.Context, eventID string
 		zones = append(zones, z)
 	}
 	return zones, rows.Err()
+}
+
+func (r *eventRepository) FindZoneName(ctx context.Context, zoneID string) (string, error) {
+	var name string
+	err := r.db.QueryRow(ctx, `SELECT zone_name FROM seat_zones WHERE id = $1`, zoneID).Scan(&name)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return name, nil
 }
 
 func (r *eventRepository) CreateEventWithZones(
