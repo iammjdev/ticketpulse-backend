@@ -190,6 +190,81 @@ CREATE TABLE order_items (
 );
 
 -- ==========================================
+-- NEWS & ANNOUNCEMENTS CMS
+-- ==========================================
+DO $$ BEGIN
+    CREATE TYPE news_category AS ENUM ('ANNOUNCEMENT', 'CONCERT_NEWS', 'PROMOTION', 'TICKET_ALERT');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE news_articles (
+                        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                        title VARCHAR(255) NOT NULL,
+                        slug VARCHAR(255) UNIQUE NOT NULL,
+                        summary TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        cover_image TEXT,
+                        category news_category NOT NULL DEFAULT 'ANNOUNCEMENT',
+                        is_published BOOLEAN NOT NULL DEFAULT TRUE,
+                        views_count INT NOT NULL DEFAULT 0,
+                        published_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_news_published_list ON news_articles(is_published, published_at DESC);
+CREATE INDEX idx_news_category ON news_articles(category);
+
+INSERT INTO news_articles (title, slug, summary, content, cover_image, category, is_published, views_count, published_at)
+VALUES
+    (
+        'TicketPulse Gate Scanner Upgrade Notice',
+        'ticketpulse-gate-scanner-upgrade-notice',
+        'We are rolling out a faster HMAC-verified QR scanner across all venue gates starting this month — expect shorter entry lines.',
+        E'## Faster Gates, Zero Downtime\n\nStarting this month, every TicketPulse venue gate is switching to our next-generation scanner hardware. The new devices verify each ticket''s HMAC-SHA256 signature locally before round-tripping to the server, cutting average scan time from 800ms to under 120ms.\n\n**What this means for you:**\n\n- Shorter lines at VIP and general admission gates\n- Offline-tolerant scanning during brief network blips\n- The same dynamic QR code in your wallet — no re-download needed\n\nGate staff have already been trained on the new flow ahead of the Coldplay and NOVA BLACK tour dates. Thanks for your patience during the rollout.',
+        'https://images.unsplash.com/photo-1540039155733-5bb30b53aa14?w=1200',
+        'ANNOUNCEMENT',
+        TRUE,
+        1842,
+        '2026-07-18T09:00:00+07:00'
+    ),
+    (
+        'Coldplay World Tour: Extra CAT 2 Zone Released',
+        'coldplay-world-tour-extra-cat2-zone-released',
+        'Due to overwhelming demand, we have unlocked an additional 1,500 CAT 2 seats for the Music of the Spheres Bangkok stop.',
+        E'## Extra Capacity Unlocked\n\nAfter CAT 2 sold out within nine minutes of going live, the promoter has approved an additional release of 1,500 seats for **COLDPLAY — Music of the Spheres** at Impact Arena.\n\nThe new allocation is now live in the Redis stock pool and reflected instantly on the event page — no refresh trickery needed, the zone counter updates in real time as tickets are reserved.\n\nJoin the virtual queue early; based on the first release, we expect this batch to move just as fast.',
+        'https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=1200',
+        'CONCERT_NEWS',
+        TRUE,
+        5390,
+        '2026-07-22T14:30:00+07:00'
+    ),
+    (
+        'August Promo: 10% Off VIP Tiers with Code PULSE10',
+        'august-promo-10-percent-off-vip-tiers',
+        'Book any VIP or VIP Standing zone this August and save 10% at checkout with code PULSE10 — valid on all live events.',
+        E'## Limited-Time VIP Discount\n\nTo celebrate the platform''s biggest month yet, every **VIP** and **VIP Standing** zone across all currently on-sale events is 10% off when you apply code `PULSE10` at checkout.\n\n**Terms:**\n\n- Valid August 1–31, 2026\n- Stacks with member-tier pricing where applicable\n- One redemption per order, non-transferable\n\nApplies automatically to eligible zones — just make sure your cart total reflects the discount before confirming payment.',
+        'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=1200',
+        'PROMOTION',
+        TRUE,
+        3127,
+        '2026-08-01T08:00:00+07:00'
+    ),
+    (
+        'Ticket Alert: NOVA BLACK Requires ID Verification at Checkout',
+        'nova-black-requires-id-verification-checkout',
+        'Reminder: NOVA BLACK — World Tour tickets require a verified National ID or Passport on file before reservation completes.',
+        E'## Identity Verification Reminder\n\nTo curb scalping on our highest-demand show, **NOVA BLACK — World Tour in Bangkok** requires a verified National ID or Passport on your account before any reservation can be confirmed.\n\nIf you haven''t verified yet, you''ll be prompted during checkout — the process takes under a minute and only needs to be completed once. Your ID name must match the name on your ticket at the gate.\n\nVerify ahead of time from **Settings → Account Details** to skip the extra step when the queue opens.',
+        'https://images.unsplash.com/photo-1501281668745-f7f57925c3b4?w=1200',
+        'TICKET_ALERT',
+        TRUE,
+        2764,
+        '2026-07-25T11:15:00+07:00'
+    )
+ON CONFLICT (slug) DO NOTHING;
+
+-- ==========================================
 -- HIGH-PERFORMANCE INDEXES (CS Optimization)
 -- ==========================================
 -- B-Tree Compound Index for instant zone stock checks ($O(\log N)$ complexity)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
@@ -28,8 +30,30 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 0. Load Environment Variables from .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("⚠️ No .env file found, reading from system environment variables")
+	}
+
+	// Helper function for ENV defaults
+	getEnv := func(key, defaultValue string) string {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+		return defaultValue
+	}
+
 	// 1. Initialize PostgreSQL Connection Pool (pgxpool)
-	dbConnString := "postgres://postgres:postgrespassword@localhost:5432/ticketpulse_db?sslmode=disable"
+	dbHost := getEnv("DB_HOST", "127.0.0.1")
+	dbPort := getEnv("DB_PORT", "5432")
+	dbUser := getEnv("DB_USER", "postgres")
+	dbPass := getEnv("DB_PASSWORD", "postgrespassword")
+	dbName := getEnv("DB_NAME", "ticketpulse_db")
+	dbSSL := getEnv("DB_SSLMODE", "disable")
+
+	dbConnString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		dbUser, dbPass, dbHost, dbPort, dbName, dbSSL)
+
 	dbPool, err := pgxpool.New(ctx, dbConnString)
 	if err != nil {
 		log.Fatalf("❌ Unable to connect to PostgreSQL pool: %v\n", err)
@@ -42,12 +66,16 @@ func main() {
 	log.Println("🐘 PostgreSQL Connection Pool established successfully!")
 
 	// 2. Initialize Redis Client
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisPass := os.Getenv("REDIS_PASSWORD")
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr:     redisAddr,
+		Password: redisPass,
 	})
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		log.Fatalf("❌ Redis Ping failed: %v\n", err)
 	}
+	log.Println("🔴 Redis Connection established successfully!")
 
 	// 3. Initialize Redis Repository
 	redisRepo, err := repository.NewRedisRepository(redisClient, "internal/repository/lua/reserve_ticket.lua")
@@ -59,12 +87,13 @@ func main() {
 	go expirationWorker.Start(ctx)
 
 	// 4. Initialize Kafka Producer & Worker Engine
-	kafkaBrokers := []string{"localhost:9092"}
+	kafkaBroker := getEnv("KAFKA_BROKERS", "localhost:9092")
+	kafkaBrokers := []string{kafkaBroker}
 	kafkaTopic := "order.created"
 	kafkaProducer := messaging.NewKafkaProducer(kafkaBrokers[0], kafkaTopic)
 	defer kafkaProducer.Close()
 
-	// Pre-warm Kafka Topic (Publish dummy event to ensure topic existence)
+	// Pre-warm Kafka Topic
 	_ = kafkaProducer.PublishOrderCreated(ctx, messaging.OrderCreatedEvent{
 		OrderID:   uuid.New().String(),
 		EventID:   "11111111-1111-1111-1111-111111111111",
@@ -91,6 +120,10 @@ func main() {
 	orderHandler := handler.NewOrderHandler(orderRepo, userRepo)
 	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, redisRepo)
+
+	newsRepo := repository.NewNewsRepository(dbPool)
+	newsService := service.NewNewsService(newsRepo, redisClient)
+	newsHandler := handler.NewNewsHandler(newsService)
 
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
@@ -139,6 +172,10 @@ func main() {
 	app.Get("/api/v1/events", eventHandler.ListEvents)
 	app.Get("/api/v1/events/:id", eventHandler.GetEvent)
 
+	// Public News & Announcements Endpoints
+	app.Get("/api/v1/news", newsHandler.ListNews)
+	app.Get("/api/v1/news/:slug", newsHandler.GetNewsBySlug)
+
 	// Virtual Queue Endpoints
 	app.Post("/api/v1/queue/join", authmw.JWTMiddleware, queueHandler.JoinQueue)
 	app.Get("/api/v1/queue/stream", queueHandler.StreamQueueStatus)
@@ -168,13 +205,19 @@ func main() {
 	})
 	admin.Post("/events", eventHandler.CreateEvent)
 
+	admin.Get("/news", newsHandler.AdminListNews)
+	admin.Post("/news", newsHandler.CreateNews)
+	admin.Put("/news/:id", newsHandler.UpdateNews)
+	admin.Delete("/news/:id", newsHandler.DeleteNews)
+
 	// Graceful Shutdown Setup
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	serverPort := getEnv("PORT", "8080")
 	go func() {
-		log.Println("🚀 TicketPulse API Server starting on :8080...")
-		if err := app.Listen(":8080"); err != nil && err != http.ErrServerClosed {
+		log.Printf("🚀 TicketPulse API Server starting on :%s...\n", serverPort)
+		if err := app.Listen(":" + serverPort); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("❌ Server error: %v\n", err)
 		}
 	}()
