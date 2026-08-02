@@ -55,9 +55,10 @@ type OrderRepository interface {
 	// RangeTotals sums gross revenue and tickets sold for paid orders in [since, until) — used
 	// to compute the dashboard's period-over-period delta.
 	RangeTotals(ctx context.Context, since, until time.Time) (revenue float64, tickets int, err error)
-	// ZoneBreakdown aggregates sold tickets, capacity, and revenue per zone_name across every
-	// event, for the admin dashboard's zone occupancy & revenue share widget.
-	ZoneBreakdown(ctx context.Context) ([]domain.ZoneBreakdownPoint, error)
+	// ZoneBreakdown aggregates sold tickets, capacity, and revenue per zone, for the admin
+	// dashboard's zone occupancy & revenue share widget. eventID == "" aggregates by zone_name
+	// across every event; a specific eventID scopes to that event's own zones.
+	ZoneBreakdown(ctx context.Context, eventID string) ([]domain.ZoneBreakdownPoint, error)
 }
 
 type orderRepository struct {
@@ -258,7 +259,38 @@ func (r *orderRepository) RangeTotals(ctx context.Context, since, until time.Tim
 	return revenue, tickets, err
 }
 
-func (r *orderRepository) ZoneBreakdown(ctx context.Context) ([]domain.ZoneBreakdownPoint, error) {
+// ZoneBreakdown aggregates by zone_name across every event when eventID is "", or scopes to a
+// single event's own zones (returning their real seat_zones.id instead of a name-based
+// grouping key) when eventID is set — the admin dashboard's per-event zone analytics filter.
+func (r *orderRepository) ZoneBreakdown(ctx context.Context, eventID string) ([]domain.ZoneBreakdownPoint, error) {
+	if eventID != "" {
+		query := `
+			SELECT sz.id, sz.zone_name, sz.total_capacity,
+			       COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('COMPLETED', 'CHECKED_IN')), 0),
+			       COALESCE(SUM(o.total_amount) FILTER (WHERE o.status IN ('COMPLETED', 'CHECKED_IN')), 0)
+			FROM seat_zones sz
+			LEFT JOIN orders o ON o.zone_id = sz.id::text
+			WHERE sz.event_id = $1
+			GROUP BY sz.id, sz.zone_name, sz.total_capacity
+			ORDER BY sz.zone_name
+		`
+		rows, err := r.db.Query(ctx, query, eventID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		zones := make([]domain.ZoneBreakdownPoint, 0)
+		for rows.Next() {
+			var z domain.ZoneBreakdownPoint
+			if err := rows.Scan(&z.ID, &z.Name, &z.Capacity, &z.Sold, &z.Revenue); err != nil {
+				return nil, err
+			}
+			zones = append(zones, z)
+		}
+		return zones, rows.Err()
+	}
+
 	query := `
 		WITH zone_totals AS (
 			SELECT zone_name, SUM(total_capacity) AS capacity

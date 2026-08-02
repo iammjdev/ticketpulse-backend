@@ -2,10 +2,12 @@ package handler
 
 import (
 	"errors"
+	"net/mail"
 	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
@@ -157,4 +159,99 @@ func (h *UserHandler) AdminUpdateUser(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"user": adminUserResponse(user)})
+}
+
+type createUserRequest struct {
+	FullName string `json:"full_name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+}
+
+// AdminCreateUser creates a new staff/admin account directly — pre-verified, no OTP flow,
+// since the requesting admin is vouching for the address. ADMIN only.
+func (h *UserHandler) AdminCreateUser(c *fiber.Ctx) error {
+	var req createUserRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if _, err := mail.ParseAddress(email); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "A valid email is required"})
+	}
+	if len(req.Password) < 8 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Password must be at least 8 characters"})
+	}
+	role, ok := resolveRole(req.Role)
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "role must be one of USER, ADMIN, STAFF_SCANNER"})
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
+	}
+
+	user, err := h.users.AdminCreateUser(c.Context(), strings.TrimSpace(req.FullName), email, string(hash), role)
+	if err != nil {
+		if errors.Is(err, repository.ErrEmailTaken) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "An account with this email already exists"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create user"})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"user": adminUserResponse(user)})
+}
+
+type editUserRequest struct {
+	FullName    string `json:"full_name"`
+	Email       string `json:"email"`
+	Role        string `json:"role"`
+	IsSuspended bool   `json:"is_suspended"`
+}
+
+// AdminEditUser overwrites a user's full profile — name, email, role, and suspended state —
+// in one call, for the admin directory's full edit drawer. ADMIN only.
+func (h *UserHandler) AdminEditUser(c *fiber.Ctx) error {
+	id := c.Params("id")
+
+	var req editUserRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if _, err := mail.ParseAddress(email); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "A valid email is required"})
+	}
+	role, ok := resolveRole(req.Role)
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "role must be one of USER, ADMIN, STAFF_SCANNER"})
+	}
+
+	user, err := h.users.AdminUpdateUser(c.Context(), id, strings.TrimSpace(req.FullName), email, role, req.IsSuspended)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrUserNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+		case errors.Is(err, repository.ErrEmailTaken):
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "An account with this email already exists"})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update user"})
+		}
+	}
+
+	return c.JSON(fiber.Map{"user": adminUserResponse(user)})
+}
+
+// AdminDeleteUser soft-deletes a user (sets deleted_at) — order and login history are kept
+// for audit purposes, the account just stops being able to log in or appear in the directory.
+// ADMIN only.
+func (h *UserHandler) AdminDeleteUser(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if err := h.users.SoftDeleteUser(c.Context(), id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete user"})
+	}
+	return c.JSON(fiber.Map{"message": "User deleted", "id": id})
 }

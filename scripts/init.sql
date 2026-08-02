@@ -16,7 +16,7 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-    CREATE TYPE event_status AS ENUM ('UPCOMING', 'PRE_WAITING', 'LIVE', 'ENDED');
+    CREATE TYPE event_status AS ENUM ('UPCOMING', 'PRE_WAITING', 'LIVE', 'ENDED', 'CANCELLED');
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS users (
                         is_verified BOOLEAN DEFAULT FALSE NOT NULL,
                         is_suspended BOOLEAN DEFAULT FALSE NOT NULL,
                         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
+                        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                        deleted_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -83,7 +84,8 @@ CREATE TABLE events (
                         requires_id_verification BOOLEAN NOT NULL DEFAULT FALSE,
                         status event_status NOT NULL DEFAULT 'UPCOMING',
                         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                        deleted_at TIMESTAMPTZ
 );
 
 -- Seed demo venues & events — ids match the static catalog in

@@ -14,6 +14,9 @@ type SalesSeriesPoint struct {
 // sharing the same zone_name (e.g. every event's "VIP" zone counted together), for the admin
 // dashboard's zone occupancy & revenue share widget.
 type ZoneBreakdownPoint struct {
+	// ID is only populated when scoped to a single event (real seat_zones.id) — empty in the
+	// all-events aggregate view, which groups by name across many different zone rows.
+	ID       string  `json:"id,omitempty"`
 	Name     string  `json:"name"`
 	Sold     int     `json:"sold"`
 	Capacity int     `json:"capacity"`

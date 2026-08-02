@@ -200,14 +200,75 @@ func (h *SeatHandler) AdminBulkCreateSeats(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": "Seats created", "count": len(seats)})
 }
 
-// AdminAIGenerateSeats accepts a poster/seat-map image upload, asks the AI vision
-// synthesizer to infer zones and rows from it (see internal/service.GenerateSeatLayoutFromPoster
-// for the vision-vs-deterministic-fallback split), upserts the inferred zones into
-// seat_zones, and persists the resulting seats. Returns the event's full current seat map.
-// ADMIN only.
-func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
-	eventID := c.Params("id")
+// previewRow/previewZone/previewStage mirror service.AILayout but with start_x/start_y (and
+// the stage anchor) already scaled from image percentages into the 1000x620 world-space
+// canvas the frontend's CanvasSeatMap renders — the review drawer's live preview and the
+// eventual confirm payload both work in world-space, not percentages.
+type previewRow struct {
+	RowLabel  string  `json:"row_label"`
+	SeatCount int     `json:"seat_count"`
+	StartX    float64 `json:"start_x"`
+	StartY    float64 `json:"start_y"`
+}
 
+type previewZone struct {
+	ZoneName string       `json:"zone_name"`
+	Price    float64      `json:"price"`
+	ColorHex string       `json:"color_hex"`
+	SeatType string       `json:"seat_type"`
+	Rows     []previewRow `json:"rows"`
+}
+
+type previewStage struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+type previewLayout struct {
+	Stage previewStage  `json:"stage"`
+	Zones []previewZone `json:"zones"`
+}
+
+func toPreviewLayout(layout *service.AILayout) previewLayout {
+	out := previewLayout{
+		Stage: previewStage{
+			X: clampWorld(layout.Stage.X/100*aiSeatMapWorldWidth, aiSeatMapWorldWidth),
+			Y: clampWorld(layout.Stage.Y/100*aiSeatMapWorldHeight, aiSeatMapWorldHeight),
+		},
+		Zones: make([]previewZone, 0, len(layout.Zones)),
+	}
+	for _, z := range layout.Zones {
+		rows := make([]previewRow, 0, len(z.Rows))
+		for _, row := range z.Rows {
+			rows = append(rows, previewRow{
+				RowLabel:  strings.TrimSpace(row.RowLabel),
+				SeatCount: row.SeatCount,
+				StartX:    clampWorld(row.StartX/100*aiSeatMapWorldWidth, aiSeatMapWorldWidth),
+				StartY:    clampWorld(row.StartY/100*aiSeatMapWorldHeight, aiSeatMapWorldHeight),
+			})
+		}
+		seatType := strings.ToUpper(strings.TrimSpace(z.SeatType))
+		if seatType != "STANDING" {
+			seatType = "SEATED"
+		}
+		out.Zones = append(out.Zones, previewZone{
+			ZoneName: strings.TrimSpace(z.ZoneName),
+			Price:    z.Price,
+			ColorHex: z.ColorHex,
+			SeatType: seatType,
+			Rows:     rows,
+		})
+	}
+	return out
+}
+
+// AdminAIPreviewSeats accepts a poster/seat-map image upload and asks the AI vision
+// synthesizer to infer a stage anchor and zones/rows from it (see
+// internal/service.GenerateSeatLayoutFromPoster for the vision-vs-deterministic-fallback
+// split). This is preview-only — nothing is written to Postgres. The admin reviews/edits the
+// returned layout in the frontend's AI Layout Review Drawer, then calls AdminAIConfirmSeats
+// to persist it. ADMIN only.
+func (h *SeatHandler) AdminAIPreviewSeats(c *fiber.Ctx) error {
 	fileHeader, err := c.FormFile("poster_image")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "poster_image file is required"})
@@ -237,26 +298,52 @@ func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
 		log.Printf("⚠️ AI seat layout generation failed: %v\n", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to analyze poster image"})
 	}
+	if len(layout.Zones) == 0 {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Could not infer any seating zones from this image"})
+	}
 
-	zoneInputs := make([]repository.NewZone, 0, len(layout.Zones))
-	for _, z := range layout.Zones {
+	return c.JSON(toPreviewLayout(layout))
+}
+
+type confirmSeatsRequest struct {
+	Zones []previewZone `json:"zones"`
+}
+
+// AdminAIConfirmSeats takes the (admin-reviewed, possibly hand-edited) layout returned by
+// AdminAIPreviewSeats and persists it for real: upserts the zones into seat_zones, pre-warms
+// their Redis stock, and bulk-creates the seats. This is the only step in the AI seat-map flow
+// that writes to Postgres. Returns the event's full current seat map. ADMIN only.
+func (h *SeatHandler) AdminAIConfirmSeats(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+
+	var req confirmSeatsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	zoneInputs := make([]repository.NewZone, 0, len(req.Zones))
+	for _, z := range req.Zones {
 		capacity := 0
 		for _, r := range z.Rows {
 			capacity += r.SeatCount
 		}
 		name := strings.TrimSpace(z.ZoneName)
+		seatType := strings.ToUpper(strings.TrimSpace(z.SeatType))
+		if seatType != "STANDING" {
+			seatType = "SEATED"
+		}
 		if capacity <= 0 || name == "" {
 			continue
 		}
 		zoneInputs = append(zoneInputs, repository.NewZone{
 			Name:          name,
-			Type:          "SEATED",
+			Type:          seatType,
 			Price:         z.Price,
 			TotalCapacity: capacity,
 		})
 	}
 	if len(zoneInputs) == 0 {
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Could not infer any seating zones from this image"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "At least one zone with seats is required"})
 	}
 
 	zones, err := h.events.UpdateEventZones(c.Context(), eventID, zoneInputs)
@@ -264,7 +351,12 @@ func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
 		if errors.Is(err, repository.ErrEventNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save inferred zones"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save zones"})
+	}
+	for _, z := range zones {
+		if err := h.redis.WarmupStock(c.Context(), eventID, z.ID, z.TotalCapacity); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Zones saved, but failed to pre-warm Redis stock"})
+		}
 	}
 	zoneIDByName := make(map[string]string, len(zones))
 	for _, z := range zones {
@@ -272,7 +364,7 @@ func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
 	}
 
 	seatInputs := make([]repository.NewSeat, 0)
-	for _, z := range layout.Zones {
+	for _, z := range req.Zones {
 		zoneID, ok := zoneIDByName[strings.TrimSpace(z.ZoneName)]
 		if !ok {
 			continue
@@ -282,8 +374,8 @@ func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
 			if rowLabel == "" || row.SeatCount <= 0 {
 				continue
 			}
-			baseX := clampWorld(row.StartX/100*aiSeatMapWorldWidth, aiSeatMapWorldWidth)
-			baseY := clampWorld(row.StartY/100*aiSeatMapWorldHeight, aiSeatMapWorldHeight)
+			baseX := clampWorld(row.StartX, aiSeatMapWorldWidth)
+			baseY := clampWorld(row.StartY, aiSeatMapWorldHeight)
 			for n := 1; n <= row.SeatCount; n++ {
 				seatInputs = append(seatInputs, repository.NewSeat{
 					ZoneID:     zoneID,
@@ -296,11 +388,11 @@ func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
 		}
 	}
 	if len(seatInputs) == 0 {
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Inferred zones had no seats"})
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Zones had no seats"})
 	}
 
 	if err := h.seats.BulkCreateSeats(c.Context(), eventID, seatInputs); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save generated seats"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save seats"})
 	}
 
 	seats, err := h.seats.GetSeatsByEventID(c.Context(), eventID)

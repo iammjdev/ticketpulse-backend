@@ -7,12 +7,24 @@ import (
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
 )
 
-var ErrUserNotFound = errors.New("user not found")
+var (
+	ErrUserNotFound = errors.New("user not found")
+	// ErrEmailTaken mirrors service.ErrEmailTaken for the admin create/update user flows,
+	// which operate at the repository layer directly rather than through AuthService.
+	ErrEmailTaken = errors.New("an account with this email already exists")
+)
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint violation (23505).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 // UserListFilter narrows GET /admin/users queries.
 type UserListFilter struct {
@@ -36,6 +48,15 @@ type UserRepository interface {
 	UpdateSuspended(ctx context.Context, id string, suspended bool) (*domain.User, error)
 	// RecordLoginEvent appends one row to the login audit trail, success or failure.
 	RecordLoginEvent(ctx context.Context, userID, ipAddress, userAgent string, success bool) error
+	// AdminCreateUser creates a pre-verified staff/admin account (no OTP flow — the admin
+	// vouches for the address directly). Returns ErrEmailTaken on a duplicate email.
+	AdminCreateUser(ctx context.Context, fullName, email, passwordHash string, role domain.UserRole) (*domain.User, error)
+	// AdminUpdateUser overwrites full_name, email, role, and suspended state in one statement.
+	// Returns ErrEmailTaken on a duplicate email, ErrUserNotFound if id doesn't match a live row.
+	AdminUpdateUser(ctx context.Context, id, fullName, email string, role domain.UserRole, suspended bool) (*domain.User, error)
+	// SoftDeleteUser sets deleted_at, excluding the account from every other query without
+	// destroying its order/login history. Idempotent: deleting twice is a no-op, not an error.
+	SoftDeleteUser(ctx context.Context, id string) error
 }
 
 type userRepository struct {
@@ -60,19 +81,19 @@ func (r *userRepository) CreateUser(ctx context.Context, user *domain.User) erro
 }
 
 func (r *userRepository) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
-	query := "SELECT " + userColumns + " FROM users WHERE email = $1"
+	query := "SELECT " + userColumns + " FROM users WHERE email = $1 AND deleted_at IS NULL"
 	return scanUser(r.db.QueryRow(ctx, query, email))
 }
 
 func (r *userRepository) FindByID(ctx context.Context, id string) (*domain.User, error) {
-	query := "SELECT " + userColumns + " FROM users WHERE id = $1"
+	query := "SELECT " + userColumns + " FROM users WHERE id = $1 AND deleted_at IS NULL"
 	return scanUser(r.db.QueryRow(ctx, query, id))
 }
 
 func (r *userRepository) UpdateProfile(ctx context.Context, id, fullName, phone, nationalID string) (*domain.User, error) {
 	query := `
 		UPDATE users SET full_name = NULLIF($2, ''), phone = $3, national_id = $4, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 		RETURNING ` + userColumns
 	return scanUser(r.db.QueryRow(ctx, query, id, fullName, phone, nationalID))
 }
@@ -85,9 +106,48 @@ func (r *userRepository) UpdatePasswordHash(ctx context.Context, id, passwordHas
 func (r *userRepository) MarkVerified(ctx context.Context, email string) (*domain.User, error) {
 	query := `
 		UPDATE users SET is_verified = TRUE, updated_at = CURRENT_TIMESTAMP
-		WHERE email = $1
+		WHERE email = $1 AND deleted_at IS NULL
 		RETURNING ` + userColumns
 	return scanUser(r.db.QueryRow(ctx, query, email))
+}
+
+// AdminCreateUser creates a pre-verified staff/admin account directly (no OTP flow).
+func (r *userRepository) AdminCreateUser(ctx context.Context, fullName, email, passwordHash string, role domain.UserRole) (*domain.User, error) {
+	query := `
+		INSERT INTO users (email, password_hash, full_name, role, member_tier, is_verified)
+		VALUES ($1, $2, NULLIF($3, ''), $4, 'REGULAR', TRUE)
+		RETURNING ` + userColumns
+	u, err := scanUser(r.db.QueryRow(ctx, query, email, passwordHash, fullName, role))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrEmailTaken
+		}
+		return nil, err
+	}
+	return u, nil
+}
+
+// AdminUpdateUser overwrites full_name, email, role, and suspended state in one statement.
+func (r *userRepository) AdminUpdateUser(ctx context.Context, id, fullName, email string, role domain.UserRole, suspended bool) (*domain.User, error) {
+	query := `
+		UPDATE users
+		SET full_name = NULLIF($2, ''), email = $3, role = $4, is_suspended = $5, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND deleted_at IS NULL
+		RETURNING ` + userColumns
+	u, err := scanUser(r.db.QueryRow(ctx, query, id, fullName, email, role, suspended))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrEmailTaken
+		}
+		return nil, err
+	}
+	return u, nil
+}
+
+// SoftDeleteUser sets deleted_at if not already set. Idempotent — deleting twice is a no-op.
+func (r *userRepository) SoftDeleteUser(ctx context.Context, id string) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, id)
+	return err
 }
 
 // ListUsers powers the admin user directory table: optional role/search filters, paginated,
@@ -101,7 +161,7 @@ func (r *userRepository) ListUsers(ctx context.Context, filter UserListFilter) (
 	}
 	offset := (page - 1) * limit
 
-	where := "WHERE 1 = 1"
+	where := "WHERE u.deleted_at IS NULL"
 	args := []any{}
 	argN := 0
 	nextArg := func(v any) string {
@@ -196,12 +256,12 @@ func (r *userRepository) RecordLoginEvent(ctx context.Context, userID, ipAddress
 }
 
 func (r *userRepository) UpdateRole(ctx context.Context, id string, role domain.UserRole) (*domain.User, error) {
-	query := "UPDATE users SET role = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING " + userColumns
+	query := "UPDATE users SET role = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NULL RETURNING " + userColumns
 	return scanUser(r.db.QueryRow(ctx, query, id, role))
 }
 
 func (r *userRepository) UpdateSuspended(ctx context.Context, id string, suspended bool) (*domain.User, error) {
-	query := "UPDATE users SET is_suspended = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING " + userColumns
+	query := "UPDATE users SET is_suspended = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND deleted_at IS NULL RETURNING " + userColumns
 	return scanUser(r.db.QueryRow(ctx, query, id, suspended))
 }
 

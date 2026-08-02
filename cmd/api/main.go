@@ -259,10 +259,13 @@ func main() {
 	admin.Post("/events", eventHandler.CreateEvent)
 	admin.Get("/events", eventHandler.AdminListEvents)
 	admin.Get("/venues", eventHandler.AdminListVenues)
+	admin.Put("/events/:id", eventHandler.AdminUpdateEventMetadata)
+	admin.Delete("/events/:id", eventHandler.AdminDeleteEvent)
 	admin.Put("/events/:id/zones", eventHandler.UpdateZones)
 	admin.Post("/events/:id/status", eventHandler.UpdateEventStatus)
 	admin.Post("/events/:id/seats", seatHandler.AdminBulkCreateSeats)
-	admin.Post("/events/:id/seats/ai-generate", seatHandler.AdminAIGenerateSeats)
+	admin.Post("/events/:id/seats/ai-preview", seatHandler.AdminAIPreviewSeats)
+	admin.Post("/events/:id/seats/ai-confirm", seatHandler.AdminAIConfirmSeats)
 
 	admin.Get("/news", newsHandler.AdminListNews)
 	admin.Post("/news", newsHandler.CreateNews)
@@ -270,7 +273,10 @@ func main() {
 	admin.Delete("/news/:id", newsHandler.DeleteNews)
 
 	admin.Get("/users", userHandler.AdminListUsers)
+	admin.Post("/users", userHandler.AdminCreateUser)
+	admin.Put("/users/:id", userHandler.AdminEditUser)
 	admin.Patch("/users/:id/role", userHandler.AdminUpdateUser)
+	admin.Delete("/users/:id", userHandler.AdminDeleteUser)
 
 	admin.Get("/orders", orderHandler.AdminListOrders)
 

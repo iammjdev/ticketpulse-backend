@@ -9,6 +9,7 @@ const (
 	EventPreWaiting EventStatus = "PRE_WAITING"
 	EventLive       EventStatus = "LIVE"
 	EventEnded      EventStatus = "ENDED"
+	EventCancelled  EventStatus = "CANCELLED"
 )
 
 type Venue struct {
@@ -42,14 +43,15 @@ type EventSummary struct {
 // EventDetail is the full shape returned by GET /api/v1/events/:id, joined with its venue
 // and ticket zones.
 type EventDetail struct {
-	ID          string      `json:"id"`
-	Title       string      `json:"title"`
-	Description string      `json:"description"`
-	BannerURL   string      `json:"banner_url"`
-	EventDate   time.Time   `json:"event_date"`
-	Status      EventStatus `json:"status"`
-	Venue       Venue       `json:"venue"`
-	Zones       []Zone      `json:"zones"`
+	ID                     string      `json:"id"`
+	Title                  string      `json:"title"`
+	Description            string      `json:"description"`
+	BannerURL              string      `json:"banner_url"`
+	EventDate              time.Time   `json:"event_date"`
+	Status                 EventStatus `json:"status"`
+	RequiresIDVerification bool        `json:"requires_id_verification"`
+	Venue                  Venue       `json:"venue"`
+	Zones                  []Zone      `json:"zones"`
 }
 
 // AdminEventSummary is the list-view shape returned by GET /api/v1/admin/events. Unlike

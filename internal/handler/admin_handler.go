@@ -144,7 +144,7 @@ func (h *AdminHandler) SalesSeries(c *fiber.Ctx) error {
 // ZoneBreakdown returns sold/capacity/revenue aggregated per zone name across every event, for
 // the admin dashboard's zone occupancy & revenue share widget. ADMIN only.
 func (h *AdminHandler) ZoneBreakdown(c *fiber.Ctx) error {
-	zones, err := h.orders.ZoneBreakdown(c.Context())
+	zones, err := h.orders.ZoneBreakdown(c.Context(), c.Query("event_id"))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to compute zone breakdown"})
 	}
@@ -162,6 +162,10 @@ func (h *AdminHandler) Health(c *fiber.Ctx) error {
 	activeHolds, err := h.redis.GetActiveHoldCount(ctx)
 	redisStatus := "healthy"
 	if err != nil {
+		redisStatus = "degraded"
+	}
+	memoryBytes, memErr := h.redis.MemoryUsageBytes(ctx)
+	if memErr != nil {
 		redisStatus = "degraded"
 	}
 
@@ -184,8 +188,9 @@ func (h *AdminHandler) Health(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"redis": fiber.Map{
-			"status":       redisStatus,
-			"active_holds": activeHolds,
+			"status":            redisStatus,
+			"active_holds":      activeHolds,
+			"memory_used_bytes": memoryBytes,
 		},
 		"kafka": fiber.Map{
 			"status":         kafkaStatus,

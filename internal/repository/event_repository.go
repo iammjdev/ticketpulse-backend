@@ -11,7 +11,12 @@ import (
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
 )
 
-var ErrEventNotFound = errors.New("event not found")
+var (
+	ErrEventNotFound = errors.New("event not found")
+	// ErrEventHasOrders blocks deletion of an event with any non-cancelled/non-expired order —
+	// real customers hold tickets or paid money against it.
+	ErrEventHasOrders = errors.New("event has active or completed orders and cannot be deleted")
+)
 
 type NewZone struct {
 	Name          string
@@ -51,6 +56,21 @@ type EventRepository interface {
 	UpdateEventZones(ctx context.Context, eventID string, zones []NewZone) ([]domain.Zone, error)
 	// UpdateEventStatus transitions an event to a new lifecycle status. ADMIN only.
 	UpdateEventStatus(ctx context.Context, eventID string, status domain.EventStatus) (*domain.EventDetail, error)
+	// UpdateEventMetadata overwrites an event's editable metadata fields. ADMIN only.
+	UpdateEventMetadata(ctx context.Context, eventID string, input UpdateEventInput) (*domain.EventDetail, error)
+	// SoftDeleteEvent sets deleted_at after verifying no PENDING/COMPLETED/CHECKED_IN order
+	// references the event — returns ErrEventHasOrders if any do. ADMIN only.
+	SoftDeleteEvent(ctx context.Context, eventID string) error
+}
+
+// UpdateEventInput carries the editable fields for PUT /admin/events/:id.
+type UpdateEventInput struct {
+	VenueID                string
+	Title                  string
+	Description            string
+	BannerURL              string
+	EventDate              string
+	RequiresIDVerification bool
 }
 
 type eventRepository struct {
@@ -98,7 +118,7 @@ func (r *eventRepository) ListActiveEvents(ctx context.Context) ([]*domain.Event
 		FROM events e
 		JOIN venues v ON e.venue_id = v.id
 		LEFT JOIN seat_zones z ON z.event_id = e.id
-		WHERE e.status != 'ENDED'
+		WHERE e.status != 'ENDED' AND e.deleted_at IS NULL
 		GROUP BY e.id, v.name, v.address
 		ORDER BY e.event_date ASC
 	`
@@ -125,16 +145,16 @@ func (r *eventRepository) ListActiveEvents(ctx context.Context) ([]*domain.Event
 
 func (r *eventRepository) FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error) {
 	query := `
-		SELECT e.id, e.title, e.description, e.poster_url, e.event_date, e.status,
+		SELECT e.id, e.title, e.description, e.poster_url, e.event_date, e.status, e.requires_id_verification,
 		       v.id, v.name, v.address, v.capacity
 		FROM events e
 		JOIN venues v ON e.venue_id = v.id
-		WHERE e.id = $1
+		WHERE e.id = $1 AND e.deleted_at IS NULL
 	`
 	var d domain.EventDetail
 	var description, bannerURL *string
 	err := r.db.QueryRow(ctx, query, id).Scan(
-		&d.ID, &d.Title, &description, &bannerURL, &d.EventDate, &d.Status,
+		&d.ID, &d.Title, &description, &bannerURL, &d.EventDate, &d.Status, &d.RequiresIDVerification,
 		&d.Venue.ID, &d.Venue.Name, &d.Venue.Location, &d.Venue.Capacity,
 	)
 	if err != nil {
@@ -240,7 +260,7 @@ func (r *eventRepository) ListAdminEvents(ctx context.Context, filter AdminEvent
 	}
 	offset := (page - 1) * limit
 
-	where := "WHERE 1 = 1"
+	where := "WHERE e.deleted_at IS NULL"
 	args := []any{}
 	argN := 0
 	nextArg := func(v any) string {
@@ -327,7 +347,7 @@ func (r *eventRepository) UpdateEventZones(ctx context.Context, eventID string, 
 }
 
 func (r *eventRepository) UpdateEventStatus(ctx context.Context, eventID string, status domain.EventStatus) (*domain.EventDetail, error) {
-	tag, err := r.db.Exec(ctx, `UPDATE events SET status = $2, updated_at = NOW() WHERE id = $1`, eventID, status)
+	tag, err := r.db.Exec(ctx, `UPDATE events SET status = $2, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, eventID, status)
 	if err != nil {
 		return nil, err
 	}
@@ -335,4 +355,45 @@ func (r *eventRepository) UpdateEventStatus(ctx context.Context, eventID string,
 		return nil, ErrEventNotFound
 	}
 	return r.FindEventByID(ctx, eventID)
+}
+
+func (r *eventRepository) UpdateEventMetadata(ctx context.Context, eventID string, input UpdateEventInput) (*domain.EventDetail, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE events
+		SET venue_id = $2, title = $3, description = NULLIF($4, ''), poster_url = NULLIF($5, ''),
+		    event_date = $6, requires_id_verification = $7, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL
+	`, eventID, input.VenueID, input.Title, input.Description, input.BannerURL, input.EventDate, input.RequiresIDVerification)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrEventNotFound
+	}
+	return r.FindEventByID(ctx, eventID)
+}
+
+// SoftDeleteEvent verifies no order in a live/paid state references the event before setting
+// deleted_at — CANCELLED and EXPIRED orders don't block deletion, they're already settled.
+func (r *eventRepository) SoftDeleteEvent(ctx context.Context, eventID string) error {
+	var blockingOrders int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM orders
+		WHERE event_id = $1 AND status IN ('PENDING', 'COMPLETED', 'CHECKED_IN')
+	`, eventID).Scan(&blockingOrders)
+	if err != nil {
+		return err
+	}
+	if blockingOrders > 0 {
+		return ErrEventHasOrders
+	}
+
+	tag, err := r.db.Exec(ctx, `UPDATE events SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, eventID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrEventNotFound
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,9 @@ type RedisRepository interface {
 	// FlushAllQueues deletes every event:*:queue ZSET, returning how many queued users were
 	// dropped across all queues. An emergency admin action.
 	FlushAllQueues(ctx context.Context) (int64, error)
+	// MemoryUsageBytes reports Redis's own used_memory (INFO memory) for the admin dashboard's
+	// system health panel.
+	MemoryUsageBytes(ctx context.Context) (int64, error)
 }
 
 type redisRepository struct {
@@ -390,4 +394,17 @@ func (r *redisRepository) FlushAllQueues(ctx context.Context) (int64, error) {
 		}
 	}
 	return flushed, nil
+}
+
+func (r *redisRepository) MemoryUsageBytes(ctx context.Context) (int64, error) {
+	info, err := r.rdb.Info(ctx, "memory").Result()
+	if err != nil {
+		return 0, err
+	}
+	for line := range strings.SplitSeq(info, "\r\n") {
+		if after, ok := strings.CutPrefix(line, "used_memory:"); ok {
+			return strconv.ParseInt(strings.TrimSpace(after), 10, 64)
+		}
+	}
+	return 0, fmt.Errorf("used_memory not found in redis INFO output")
 }

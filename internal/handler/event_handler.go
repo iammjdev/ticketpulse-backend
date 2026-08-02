@@ -50,12 +50,13 @@ func eventDetailResponse(d *domain.EventDetail) fiber.Map {
 		zones = append(zones, zoneResponse(z))
 	}
 	return fiber.Map{
-		"id":          d.ID,
-		"title":       d.Title,
-		"description": d.Description,
-		"banner_url":  d.BannerURL,
-		"event_date":  d.EventDate,
-		"status":      d.Status,
+		"id":                       d.ID,
+		"title":                    d.Title,
+		"description":              d.Description,
+		"banner_url":               d.BannerURL,
+		"event_date":               d.EventDate,
+		"status":                   d.Status,
+		"requires_id_verification": d.RequiresIDVerification,
 		"venue": fiber.Map{
 			"id":       d.Venue.ID,
 			"name":     d.Venue.Name,
@@ -315,10 +316,10 @@ func (h *EventHandler) UpdateEventStatus(c *fiber.Ctx) error {
 
 	status := domain.EventStatus(strings.ToUpper(strings.TrimSpace(req.Status)))
 	switch status {
-	case domain.EventUpcoming, domain.EventPreWaiting, domain.EventLive, domain.EventEnded:
+	case domain.EventUpcoming, domain.EventPreWaiting, domain.EventLive, domain.EventEnded, domain.EventCancelled:
 		// valid
 	default:
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be one of UPCOMING, PRE_WAITING, LIVE, ENDED"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be one of UPCOMING, PRE_WAITING, LIVE, ENDED, CANCELLED"})
 	}
 
 	event, err := h.events.UpdateEventStatus(c.Context(), eventID, status)
@@ -338,4 +339,68 @@ func (h *EventHandler) UpdateEventStatus(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"event": eventDetailResponse(event)})
+}
+
+type updateEventMetadataRequest struct {
+	VenueID                string `json:"venue_id"`
+	Title                  string `json:"title"`
+	Description            string `json:"description"`
+	BannerURL              string `json:"banner_url"`
+	EventDate              string `json:"event_date"`
+	RequiresIDVerification bool   `json:"requires_id_verification"`
+}
+
+// AdminUpdateEventMetadata overwrites an event's editable metadata — title, description,
+// venue, poster, date, and ID-verification requirement. Does not touch zones or status,
+// those have their own dedicated endpoints. ADMIN only.
+func (h *EventHandler) AdminUpdateEventMetadata(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+
+	var req updateEventMetadataRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	title := strings.TrimSpace(req.Title)
+	venueID := strings.TrimSpace(req.VenueID)
+	eventDate := strings.TrimSpace(req.EventDate)
+	if title == "" || venueID == "" || eventDate == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "title, venue_id, and event_date are required"})
+	}
+
+	event, err := h.events.UpdateEventMetadata(c.Context(), eventID, repository.UpdateEventInput{
+		VenueID:                venueID,
+		Title:                  title,
+		Description:            req.Description,
+		BannerURL:              req.BannerURL,
+		EventDate:              eventDate,
+		RequiresIDVerification: req.RequiresIDVerification,
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update event"})
+	}
+
+	return c.JSON(fiber.Map{"event": eventDetailResponse(event)})
+}
+
+// AdminDeleteEvent soft-deletes an event after verifying no PENDING/COMPLETED/CHECKED_IN
+// order references it — real ticket holders block deletion. ADMIN only.
+func (h *EventHandler) AdminDeleteEvent(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+
+	if err := h.events.SoftDeleteEvent(c.Context(), eventID); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrEventNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		case errors.Is(err, repository.ErrEventHasOrders):
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "This event has active or completed orders and cannot be deleted"})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete event"})
+		}
+	}
+
+	return c.JSON(fiber.Map{"message": "Event deleted", "id": eventID})
 }
