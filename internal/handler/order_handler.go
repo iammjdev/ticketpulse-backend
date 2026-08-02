@@ -156,11 +156,14 @@ func adminOrderSummaryResponse(o *domain.AdminOrderSummary) fiber.Map {
 		"event_id":       o.EventID,
 		"event_title":    o.EventTitle,
 		"zone_id":        o.ZoneID,
+		"zone_name":      o.ZoneName,
 		"quantity":       o.Quantity,
 		"total_amount":   o.TotalAmount,
 		"status":         o.Status,
 		"created_at":     o.CreatedAt,
 		"checked_in_at":  o.CheckedInAt,
+		// HMAC-SHA256(order id) — embedded in the QR payload and re-verified at the gate.
+		"signature": service.SignTicketID(o.ID),
 	}
 }
 

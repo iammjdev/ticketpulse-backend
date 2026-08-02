@@ -20,17 +20,24 @@ func NewUserHandler(users repository.UserRepository) *UserHandler {
 }
 
 func adminUserResponse(u *domain.User) fiber.Map {
+	loginEvents := u.LoginEvents
+	if loginEvents == nil {
+		loginEvents = []domain.LoginEvent{}
+	}
 	return fiber.Map{
-		"id":           u.ID,
-		"email":        u.Email,
-		"full_name":    u.FullName,
-		"phone":        u.Phone,
-		"role":         u.Role,
-		"member_tier":  u.MemberTier,
-		"is_verified":  u.IsVerified,
-		"is_suspended": u.IsSuspended,
-		"created_at":   u.CreatedAt,
-		"updated_at":   u.UpdatedAt,
+		"id":            u.ID,
+		"email":         u.Email,
+		"full_name":     u.FullName,
+		"phone":         u.Phone,
+		"role":          u.Role,
+		"member_tier":   u.MemberTier,
+		"is_verified":   u.IsVerified,
+		"is_suspended":  u.IsSuspended,
+		"created_at":    u.CreatedAt,
+		"updated_at":    u.UpdatedAt,
+		"last_login_at": u.LastLoginAt,
+		"order_count":   u.OrderCount,
+		"login_events":  loginEvents,
 	}
 }
 

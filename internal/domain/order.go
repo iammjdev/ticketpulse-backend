@@ -38,6 +38,7 @@ type AdminOrderSummary struct {
 	EventID      string      `json:"event_id"`
 	EventTitle   string      `json:"event_title"`
 	ZoneID       string      `json:"zone_id"`
+	ZoneName     string      `json:"zone_name"`
 	Quantity     int         `json:"quantity"`
 	TotalAmount  float64     `json:"total_amount"`
 	Status       OrderStatus `json:"status"`

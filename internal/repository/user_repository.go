@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 
@@ -28,9 +29,13 @@ type UserRepository interface {
 	UpdateProfile(ctx context.Context, id, fullName, phone, nationalID string) (*domain.User, error)
 	UpdatePasswordHash(ctx context.Context, id, passwordHash string) error
 	MarkVerified(ctx context.Context, email string) (*domain.User, error)
+	// ListUsers powers the admin directory table. Every returned user's LastLoginAt, OrderCount,
+	// and LoginEvents (last 5) are populated for real from login_events/orders — not left zero.
 	ListUsers(ctx context.Context, filter UserListFilter) ([]*domain.User, int, error)
 	UpdateRole(ctx context.Context, id string, role domain.UserRole) (*domain.User, error)
 	UpdateSuspended(ctx context.Context, id string, suspended bool) (*domain.User, error)
+	// RecordLoginEvent appends one row to the login audit trail, success or failure.
+	RecordLoginEvent(ctx context.Context, userID, ipAddress, userAgent string, success bool) error
 }
 
 type userRepository struct {
@@ -86,7 +91,8 @@ func (r *userRepository) MarkVerified(ctx context.Context, email string) (*domai
 }
 
 // ListUsers powers the admin user directory table: optional role/search filters, paginated,
-// newest accounts first.
+// newest accounts first. Each row also carries LastLoginAt, OrderCount, and the last 5
+// LoginEvents, aggregated in-query via LATERAL joins rather than N+1 round trips.
 func (r *userRepository) ListUsers(ctx context.Context, filter UserListFilter) ([]*domain.User, int, error) {
 	page := max(filter.Page, 1)
 	limit := filter.Limit
@@ -113,14 +119,35 @@ func (r *userRepository) ListUsers(ctx context.Context, filter UserListFilter) (
 	}
 
 	var total int
-	if err := r.db.QueryRow(ctx, "SELECT count(*) FROM users "+where, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, "SELECT count(*) FROM users u "+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	limitArg := nextArg(limit)
 	offsetArg := nextArg(offset)
-	query := "SELECT " + userColumns + " FROM users " + where +
-		" ORDER BY created_at DESC LIMIT " + limitArg + " OFFSET " + offsetArg
+	query := `
+		SELECT u.id, u.email, u.password_hash, u.full_name, u.phone, u.national_id, u.role,
+		       u.member_tier, u.is_verified, u.is_suspended, u.created_at, u.updated_at,
+		       lo.last_login_at, COALESCE(oc.order_count, 0), COALESCE(le.history, '[]')
+		FROM users u
+		LEFT JOIN (
+			SELECT user_id, MAX(created_at) AS last_login_at
+			FROM login_events WHERE success = TRUE
+			GROUP BY user_id
+		) lo ON lo.user_id = u.id
+		LEFT JOIN (
+			SELECT user_id, COUNT(*) AS order_count
+			FROM orders GROUP BY user_id
+		) oc ON oc.user_id = u.id
+		LEFT JOIN LATERAL (
+			SELECT json_agg(ev) AS history FROM (
+				SELECT id, ip_address, user_agent, success, created_at
+				FROM login_events e WHERE e.user_id = u.id
+				ORDER BY created_at DESC LIMIT 5
+			) ev
+		) le ON true
+	` + where + `
+		ORDER BY u.created_at DESC LIMIT ` + limitArg + ` OFFSET ` + offsetArg
 
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
@@ -130,13 +157,42 @@ func (r *userRepository) ListUsers(ctx context.Context, filter UserListFilter) (
 
 	users := make([]*domain.User, 0)
 	for rows.Next() {
-		u, err := scanUser(rows)
-		if err != nil {
+		var u domain.User
+		var fullName, phone, nationalID *string
+		var historyJSON []byte
+		if err := rows.Scan(
+			&u.ID, &u.Email, &u.PasswordHash, &fullName, &phone, &nationalID,
+			&u.Role, &u.MemberTier, &u.IsVerified, &u.IsSuspended, &u.CreatedAt, &u.UpdatedAt,
+			&u.LastLoginAt, &u.OrderCount, &historyJSON,
+		); err != nil {
 			return nil, 0, err
 		}
-		users = append(users, u)
+		if fullName != nil {
+			u.FullName = *fullName
+		}
+		if phone != nil {
+			u.Phone = *phone
+		}
+		if nationalID != nil {
+			u.NationalID = *nationalID
+		}
+		u.LoginEvents = make([]domain.LoginEvent, 0)
+		if len(historyJSON) > 0 {
+			if err := json.Unmarshal(historyJSON, &u.LoginEvents); err != nil {
+				return nil, 0, err
+			}
+		}
+		users = append(users, &u)
 	}
 	return users, total, rows.Err()
+}
+
+func (r *userRepository) RecordLoginEvent(ctx context.Context, userID, ipAddress, userAgent string, success bool) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO login_events (user_id, ip_address, user_agent, success)
+		VALUES ($1, $2, $3, $4)
+	`, userID, ipAddress, userAgent, success)
+	return err
 }
 
 func (r *userRepository) UpdateRole(ctx context.Context, id string, role domain.UserRole) (*domain.User, error) {

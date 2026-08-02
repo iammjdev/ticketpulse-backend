@@ -136,7 +136,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
-	user, token, err := h.authService.Login(c.Context(), strings.TrimSpace(strings.ToLower(req.Email)), req.Password)
+	user, token, err := h.authService.Login(c.Context(), strings.TrimSpace(strings.ToLower(req.Email)), req.Password, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrInvalidCredentials):

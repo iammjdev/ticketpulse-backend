@@ -228,6 +228,15 @@ func (h *EventHandler) AdminListEvents(c *fiber.Ctx) error {
 	return c.JSON(adminEventListResponse(events, total, appliedPage, appliedLimit))
 }
 
+// AdminListVenues returns every venue for the create-event wizard's venue picker. ADMIN only.
+func (h *EventHandler) AdminListVenues(c *fiber.Ctx) error {
+	venues, err := h.events.ListVenues(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch venues"})
+	}
+	return c.JSON(fiber.Map{"venues": venues})
+}
+
 type updateZonesRequest struct {
 	Zones []createZoneRequest `json:"zones"`
 }

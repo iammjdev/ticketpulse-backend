@@ -41,10 +41,22 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
+-- Real login audit trail — recorded on every login attempt (success and failure) by
+-- AuthService.Login, backing the admin user directory's audit log drawer.
+CREATE TABLE IF NOT EXISTS login_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ip_address VARCHAR(64),
+    user_agent TEXT,
+    success BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_login_events_user ON login_events(user_id, created_at DESC);
+
 -- Seed test accounts (bcrypt cost 10) — pre-verified so the demo logins work out of the box
 INSERT INTO users (email, password_hash, full_name, role, member_tier, is_verified)
 VALUES
-    ('admin@ticketpulse.com', '$2a$10$sGnj2rjxgq51mW8SsvS0xuRzDi40l1OFe.O9WHVgE7G.ReRRP0WUa', 'TicketPulse Admin', 'ADMIN', 'REGULAR', TRUE),
+    ('admin@ticketpulse.com', '$2a$10$MUEyT/pHC.t0iufz8OcKfe4PXPQG62jTz3lZSPju.mK6b516wjNme', 'TicketPulse Admin', 'ADMIN', 'REGULAR', TRUE),
     ('user@ticketpulse.com', '$2a$10$dGBTl3iOqhSMxnuWP6KOpu1lHriGhIzWTR3uVIqOJhw.pyUSUfsnq', 'Demo User', 'USER', 'REGULAR', TRUE)
 ON CONFLICT (email) DO NOTHING;
 

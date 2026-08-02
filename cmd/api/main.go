@@ -154,7 +154,8 @@ func main() {
 	newsHandler := handler.NewNewsHandler(newsService)
 
 	userHandler := handler.NewUserHandler(userRepo)
-	adminHandler := handler.NewAdminHandler(orderRepo, redisRepo)
+	adminHandler := handler.NewAdminHandler(orderRepo, redisRepo, dbPool, kafkaCfg.Brokers[0], kafkaCfg.OrderPaidTopic, "notification-worker-group")
+	adminQueueHandler := handler.NewAdminQueueHandler(redisRepo)
 
 	webhookSecret := getEnv("PAYMENT_WEBHOOK_SECRET", "dev_webhook_secret_change_me")
 	paymentService := service.NewPaymentService(orderRepo, redisRepo, userRepo, notificationProducer)
@@ -257,6 +258,7 @@ func main() {
 	})
 	admin.Post("/events", eventHandler.CreateEvent)
 	admin.Get("/events", eventHandler.AdminListEvents)
+	admin.Get("/venues", eventHandler.AdminListVenues)
 	admin.Put("/events/:id/zones", eventHandler.UpdateZones)
 	admin.Post("/events/:id/status", eventHandler.UpdateEventStatus)
 	admin.Post("/events/:id/seats", seatHandler.AdminBulkCreateSeats)
@@ -273,6 +275,14 @@ func main() {
 	admin.Get("/orders", orderHandler.AdminListOrders)
 
 	admin.Get("/stats", adminHandler.Stats)
+	admin.Get("/dashboard/sales-series", adminHandler.SalesSeries)
+	admin.Get("/dashboard/zone-breakdown", adminHandler.ZoneBreakdown)
+	admin.Get("/dashboard/health", adminHandler.Health)
+
+	admin.Get("/queue/status", adminQueueHandler.Status)
+	admin.Put("/queue/rate", adminQueueHandler.SetRate)
+	admin.Put("/queue/pause", adminQueueHandler.SetPaused)
+	admin.Post("/queue/flush", adminQueueHandler.Flush)
 
 	// Dev tool: applies the exact success side effects of a real gateway webhook without
 	// needing PAYMENT_WEBHOOK_SECRET on the frontend. See /admin/payment-simulator.

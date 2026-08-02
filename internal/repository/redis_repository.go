@@ -51,6 +51,19 @@ type RedisRepository interface {
 	// HELD entry whose hold key already expired (hash fields carry no TTL of their own) back
 	// to AVAILABLE. Seats absent from the returned map are AVAILABLE.
 	GetSeatStatuses(ctx context.Context, eventID string) (map[string]string, error)
+
+	// GetQueueReleaseRate reads the admin-configured virtual-queue dispatch rate (users/sec),
+	// defaulting to defaultRate if never set.
+	GetQueueReleaseRate(ctx context.Context, defaultRate int) (int, error)
+	// SetQueueReleaseRate persists the admin-configured virtual-queue dispatch rate.
+	SetQueueReleaseRate(ctx context.Context, rate int) error
+	// IsQueuePaused reports whether an admin has emergency-paused virtual-queue dispatch.
+	IsQueuePaused(ctx context.Context) (bool, error)
+	// SetQueuePaused persists the emergency-pause flag for virtual-queue dispatch.
+	SetQueuePaused(ctx context.Context, paused bool) error
+	// FlushAllQueues deletes every event:*:queue ZSET, returning how many queued users were
+	// dropped across all queues. An emergency admin action.
+	FlushAllQueues(ctx context.Context) (int64, error)
 }
 
 type redisRepository struct {
@@ -310,4 +323,71 @@ func (r *redisRepository) GetSeatStatuses(ctx context.Context, eventID string) (
 	}
 
 	return statuses, nil
+}
+
+const (
+	queueReleaseRateKey = "admin:queue:release_rate"
+	queuePausedKey      = "admin:queue:paused"
+)
+
+func (r *redisRepository) GetQueueReleaseRate(ctx context.Context, defaultRate int) (int, error) {
+	val, err := r.rdb.Get(ctx, queueReleaseRateKey).Int()
+	if err != nil {
+		if err == redis.Nil {
+			return defaultRate, nil
+		}
+		return 0, err
+	}
+	return val, nil
+}
+
+func (r *redisRepository) SetQueueReleaseRate(ctx context.Context, rate int) error {
+	return r.rdb.Set(ctx, queueReleaseRateKey, rate, 0).Err()
+}
+
+func (r *redisRepository) IsQueuePaused(ctx context.Context) (bool, error) {
+	val, err := r.rdb.Get(ctx, queuePausedKey).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return false, nil
+		}
+		return false, err
+	}
+	return val == "1", nil
+}
+
+func (r *redisRepository) SetQueuePaused(ctx context.Context, paused bool) error {
+	val := "0"
+	if paused {
+		val = "1"
+	}
+	return r.rdb.Set(ctx, queuePausedKey, val, 0).Err()
+}
+
+// FlushAllQueues scans for every event:*:queue ZSET, sums their cardinalities before deleting
+// them, and returns that count so the caller can report how many queued users were dropped.
+func (r *redisRepository) FlushAllQueues(ctx context.Context) (int64, error) {
+	var flushed int64
+	var cursor uint64
+	for {
+		keys, next, err := r.rdb.Scan(ctx, cursor, "event:*:queue", 100).Result()
+		if err != nil {
+			return flushed, err
+		}
+		for _, key := range keys {
+			count, err := r.rdb.ZCard(ctx, key).Result()
+			if err != nil {
+				return flushed, err
+			}
+			if err := r.rdb.Del(ctx, key).Err(); err != nil {
+				return flushed, err
+			}
+			flushed += count
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return flushed, nil
 }

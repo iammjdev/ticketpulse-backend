@@ -192,7 +192,10 @@ func (s *AuthService) issueOTP(ctx context.Context, email string) error {
 	return SendOTPEmail(email, otp)
 }
 
-func (s *AuthService) Login(ctx context.Context, email, password string) (*domain.User, string, error) {
+// Login authenticates a user and records the attempt (success or failure) to the login audit
+// trail — ipAddress/userAgent come from the HTTP request and are best-effort, never fatal to
+// the login flow itself if the audit insert fails.
+func (s *AuthService) Login(ctx context.Context, email, password, ipAddress, userAgent string) (*domain.User, string, error) {
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
@@ -202,6 +205,7 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (*domai
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		_ = s.users.RecordLoginEvent(ctx, user.ID, ipAddress, userAgent, false)
 		return nil, "", ErrInvalidCredentials
 	}
 
@@ -213,6 +217,8 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (*domai
 	if err != nil {
 		return nil, "", err
 	}
+
+	_ = s.users.RecordLoginEvent(ctx, user.ID, ipAddress, userAgent, true)
 	return user, token, nil
 }
 
