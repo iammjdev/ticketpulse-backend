@@ -80,7 +80,11 @@ func main() {
 	log.Println("🔴 Redis Connection established successfully!")
 
 	// 3. Initialize Redis Repository
-	redisRepo, err := repository.NewRedisRepository(redisClient, "internal/repository/lua/reserve_ticket.lua")
+	redisRepo, err := repository.NewRedisRepository(
+		redisClient,
+		"internal/repository/lua/reserve_ticket.lua",
+		"internal/repository/lua/reserve_specific_seat.lua",
+	)
 	if err != nil {
 		log.Fatalf("❌ Failed to initialize Redis Repository: %v\n", err)
 	}
@@ -142,6 +146,9 @@ func main() {
 	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, redisRepo)
 
+	seatRepo := repository.NewSeatRepository(dbPool)
+	seatHandler := handler.NewSeatHandler(seatRepo, redisRepo, kafkaProducer, eventRepo, userRepo)
+
 	newsRepo := repository.NewNewsRepository(dbPool)
 	newsService := service.NewNewsService(newsRepo, redisClient)
 	newsHandler := handler.NewNewsHandler(newsService)
@@ -202,10 +209,12 @@ func main() {
 	})
 
 	app.Post("/api/v1/tickets/reserve", authmw.JWTMiddleware, ticketHandler.Reserve)
+	app.Post("/api/v1/tickets/reserve-seat", authmw.JWTMiddleware, seatHandler.ReserveSeat)
 
 	// Public Event & Venue Read Endpoints
 	app.Get("/api/v1/events", eventHandler.ListEvents)
 	app.Get("/api/v1/events/:id", eventHandler.GetEvent)
+	app.Get("/api/v1/events/:id/seats", seatHandler.GetEventSeats)
 
 	// Public News & Announcements Endpoints
 	app.Get("/api/v1/news", newsHandler.ListNews)
@@ -250,6 +259,7 @@ func main() {
 	admin.Get("/events", eventHandler.AdminListEvents)
 	admin.Put("/events/:id/zones", eventHandler.UpdateZones)
 	admin.Post("/events/:id/status", eventHandler.UpdateEventStatus)
+	admin.Post("/events/:id/seats", seatHandler.AdminBulkCreateSeats)
 
 	admin.Get("/news", newsHandler.AdminListNews)
 	admin.Post("/news", newsHandler.CreateNews)

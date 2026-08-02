@@ -165,6 +165,25 @@ CREATE TABLE tickets (
 );
 
 -- ==========================================
+-- SEAT MAP LAYOUT (Dynamic Seat Map Engine — Phase 1)
+-- ==========================================
+-- Physical seat coordinates for interactive venue rendering. Distinct from `tickets`
+-- (inventory/reservation ledger) — a row here is a point on the map, not a sellable unit;
+-- live HELD/SOLD status is tracked in Redis (event:{eventId}:seat_status), not here.
+CREATE TABLE IF NOT EXISTS seats (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    zone_id UUID NOT NULL REFERENCES seat_zones(id) ON DELETE CASCADE,
+    event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    row_label VARCHAR(10) NOT NULL,
+    seat_number INT NOT NULL,
+    position_x FLOAT NOT NULL DEFAULT 0,
+    position_y FLOAT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT unique_event_seat UNIQUE(event_id, row_label, seat_number)
+);
+CREATE INDEX IF NOT EXISTS idx_seats_event_zone ON seats(event_id, zone_id);
+
+-- ==========================================
 -- 4. ORDERS & TRANSACTION HISTORY
 -- ==========================================
 CREATE TABLE orders (

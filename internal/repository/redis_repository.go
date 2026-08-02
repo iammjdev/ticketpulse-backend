@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -41,29 +42,50 @@ type RedisRepository interface {
 	// SetEventStatus mirrors an event's lifecycle status into event:{id}:status so hot-path
 	// reservation/queue code can check it without a Postgres round trip.
 	SetEventStatus(ctx context.Context, eventID, status string) error
+
+	// ReserveSpecificSeat atomically claims one seat (as opposed to a zone-level quantity)
+	// via the reserve_specific_seat Lua script, holding it in event:{eventID}:seat_status
+	// for ttlSeconds. Returns false if the seat is already HELD or SOLD.
+	ReserveSpecificSeat(ctx context.Context, eventID, seatID, userID string, ttlSeconds int) (bool, error)
+	// GetSeatStatuses returns every non-AVAILABLE seat status for an event, self-healing any
+	// HELD entry whose hold key already expired (hash fields carry no TTL of their own) back
+	// to AVAILABLE. Seats absent from the returned map are AVAILABLE.
+	GetSeatStatuses(ctx context.Context, eventID string) (map[string]string, error)
 }
 
 type redisRepository struct {
-	rdb           *redis.Client
-	reserveLuaSHA string // Cache Compiled SHA Script for highest Performance
+	rdb               *redis.Client
+	reserveLuaSHA     string // Cache Compiled SHA Script for highest Performance
+	reserveSeatLuaSHA string
 }
 
-func NewRedisRepository(rdb *redis.Client, luaScriptPath string) (RedisRepository, error) {
-	// Read Lua Script file
-	scriptContent, err := os.ReadFile(luaScriptPath)
+func loadLuaScript(ctx context.Context, rdb *redis.Client, scriptPath string) (string, error) {
+	scriptContent, err := os.ReadFile(scriptPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read lua script: %w", err)
+		return "", fmt.Errorf("failed to read lua script %s: %w", scriptPath, err)
+	}
+	sha, err := rdb.ScriptLoad(ctx, string(scriptContent)).Result()
+	if err != nil {
+		return "", fmt.Errorf("failed to load lua script %s into redis: %w", scriptPath, err)
+	}
+	return sha, nil
+}
+
+func NewRedisRepository(rdb *redis.Client, luaScriptPath, reserveSeatLuaScriptPath string) (RedisRepository, error) {
+	sha, err := loadLuaScript(context.Background(), rdb, luaScriptPath)
+	if err != nil {
+		return nil, err
 	}
 
-	// Load Script into Redis Memory to get SHA Digest (faster script injecting)
-	sha, err := rdb.ScriptLoad(context.Background(), string(scriptContent)).Result()
+	seatSHA, err := loadLuaScript(context.Background(), rdb, reserveSeatLuaScriptPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load lua script into redis: %w", err)
+		return nil, err
 	}
 
 	return &redisRepository{
-		rdb:           rdb,
-		reserveLuaSHA: sha,
+		rdb:               rdb,
+		reserveLuaSHA:     sha,
+		reserveSeatLuaSHA: seatSHA,
 	}, nil
 }
 
@@ -214,4 +236,78 @@ func (r *redisRepository) GetActiveHoldCount(ctx context.Context) (int64, error)
 		}
 	}
 	return total, nil
+}
+
+func seatStatusKey(eventID string) string {
+	return fmt.Sprintf("event:%s:seat_status", eventID)
+}
+
+func seatHoldKey(eventID, seatID string) string {
+	return fmt.Sprintf("hold:seat:%s:%s", eventID, seatID)
+}
+
+func (r *redisRepository) ReserveSpecificSeat(ctx context.Context, eventID, seatID, userID string, ttlSeconds int) (bool, error) {
+	res, err := r.rdb.EvalSha(ctx, r.reserveSeatLuaSHA,
+		[]string{seatStatusKey(eventID), seatHoldKey(eventID, seatID)},
+		seatID, userID, ttlSeconds,
+	).Result()
+	if err != nil {
+		return false, err
+	}
+	code, _ := res.(int64)
+	return code == 1, nil
+}
+
+// GetSeatStatuses reads event:{eventID}:seat_status and, for every field still marked
+// HELD:<userID>, verifies the corresponding hold:seat:{eventID}:{seatID} key hasn't expired
+// (a Redis hash field carries no TTL of its own, so a fired hold otherwise leaves the seat
+// stuck HELD forever). Stale entries are cleared from the hash and reported as absent
+// (callers treat a missing seat as AVAILABLE).
+func (r *redisRepository) GetSeatStatuses(ctx context.Context, eventID string) (map[string]string, error) {
+	hashKey := seatStatusKey(eventID)
+	raw, err := r.rdb.HGetAll(ctx, hashKey).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	statuses := make(map[string]string, len(raw))
+	held := make([]string, 0, len(raw))
+	for seatID, value := range raw {
+		if strings.HasPrefix(value, "HELD:") {
+			held = append(held, seatID)
+			continue
+		}
+		statuses[seatID] = value
+	}
+	if len(held) == 0 {
+		return statuses, nil
+	}
+
+	pipe := r.rdb.Pipeline()
+	cmds := make(map[string]*redis.IntCmd, len(held))
+	for _, seatID := range held {
+		cmds[seatID] = pipe.Exists(ctx, seatHoldKey(eventID, seatID))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+
+	stale := make([]string, 0)
+	for seatID, cmd := range cmds {
+		if cmd.Val() > 0 {
+			statuses[seatID] = "HELD"
+		} else {
+			stale = append(stale, seatID)
+		}
+	}
+
+	if len(stale) > 0 {
+		delPipe := r.rdb.Pipeline()
+		for _, seatID := range stale {
+			delPipe.HDel(ctx, hashKey, seatID)
+		}
+		_, _ = delPipe.Exec(ctx)
+	}
+
+	return statuses, nil
 }
