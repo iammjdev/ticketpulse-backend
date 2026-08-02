@@ -260,6 +260,7 @@ func main() {
 	admin.Put("/events/:id/zones", eventHandler.UpdateZones)
 	admin.Post("/events/:id/status", eventHandler.UpdateEventStatus)
 	admin.Post("/events/:id/seats", seatHandler.AdminBulkCreateSeats)
+	admin.Post("/events/:id/seats/ai-generate", seatHandler.AdminAIGenerateSeats)
 
 	admin.Get("/news", newsHandler.AdminListNews)
 	admin.Post("/news", newsHandler.CreateNews)

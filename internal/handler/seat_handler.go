@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"io"
 	"log"
 	"strings"
 	"time"
@@ -10,12 +11,23 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
+	"github.com/iammjdev/ticketpulse-backend/internal/service"
 	"github.com/iammjdev/ticketpulse-backend/pkg/messaging"
 )
 
 // SeatHoldSeconds mirrors the payment window the zone-based flow grants (OrderWorker's
 // OrderExpirySeconds), so a specific-seat hold and its eventual order expiry stay in sync.
 const SeatHoldSeconds = 600
+
+// World-space canvas the AI-inferred layout is scaled into — mirrors the frontend's
+// SEAT_MAP_WORLD_WIDTH/HEIGHT (src/types/seatMap.ts) so an AI-generated map renders where
+// the grid-based generator's seats do.
+const (
+	aiSeatMapWorldWidth  = 1000.0
+	aiSeatMapWorldHeight = 620.0
+	aiSeatColSpacing     = 26.0
+	maxPosterImageBytes  = 8 << 20 // 8MB
+)
 
 type SeatHandler struct {
 	seats         repository.SeatRepository
@@ -186,4 +198,128 @@ func (h *SeatHandler) AdminBulkCreateSeats(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": "Seats created", "count": len(seats)})
+}
+
+// AdminAIGenerateSeats accepts a poster/seat-map image upload, asks the AI vision
+// synthesizer to infer zones and rows from it (see internal/service.GenerateSeatLayoutFromPoster
+// for the vision-vs-deterministic-fallback split), upserts the inferred zones into
+// seat_zones, and persists the resulting seats. Returns the event's full current seat map.
+// ADMIN only.
+func (h *SeatHandler) AdminAIGenerateSeats(c *fiber.Ctx) error {
+	eventID := c.Params("id")
+
+	fileHeader, err := c.FormFile("poster_image")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "poster_image file is required"})
+	}
+	if fileHeader.Size > maxPosterImageBytes {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Image must be 8MB or smaller"})
+	}
+
+	contentType := fileHeader.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "image/") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "poster_image must be an image file"})
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to read uploaded image"})
+	}
+	defer file.Close()
+
+	imageBytes, err := io.ReadAll(file)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to read uploaded image"})
+	}
+
+	layout, err := service.GenerateSeatLayoutFromPoster(c.Context(), imageBytes, contentType)
+	if err != nil {
+		log.Printf("⚠️ AI seat layout generation failed: %v\n", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to analyze poster image"})
+	}
+
+	zoneInputs := make([]repository.NewZone, 0, len(layout.Zones))
+	for _, z := range layout.Zones {
+		capacity := 0
+		for _, r := range z.Rows {
+			capacity += r.SeatCount
+		}
+		name := strings.TrimSpace(z.ZoneName)
+		if capacity <= 0 || name == "" {
+			continue
+		}
+		zoneInputs = append(zoneInputs, repository.NewZone{
+			Name:          name,
+			Type:          "SEATED",
+			Price:         z.Price,
+			TotalCapacity: capacity,
+		})
+	}
+	if len(zoneInputs) == 0 {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Could not infer any seating zones from this image"})
+	}
+
+	zones, err := h.events.UpdateEventZones(c.Context(), eventID, zoneInputs)
+	if err != nil {
+		if errors.Is(err, repository.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save inferred zones"})
+	}
+	zoneIDByName := make(map[string]string, len(zones))
+	for _, z := range zones {
+		zoneIDByName[z.Name] = z.ID
+	}
+
+	seatInputs := make([]repository.NewSeat, 0)
+	for _, z := range layout.Zones {
+		zoneID, ok := zoneIDByName[strings.TrimSpace(z.ZoneName)]
+		if !ok {
+			continue
+		}
+		for _, row := range z.Rows {
+			rowLabel := strings.TrimSpace(row.RowLabel)
+			if rowLabel == "" || row.SeatCount <= 0 {
+				continue
+			}
+			baseX := clampWorld(row.StartX/100*aiSeatMapWorldWidth, aiSeatMapWorldWidth)
+			baseY := clampWorld(row.StartY/100*aiSeatMapWorldHeight, aiSeatMapWorldHeight)
+			for n := 1; n <= row.SeatCount; n++ {
+				seatInputs = append(seatInputs, repository.NewSeat{
+					ZoneID:     zoneID,
+					RowLabel:   rowLabel,
+					SeatNumber: n,
+					PositionX:  clampWorld(baseX+float64(n-1)*aiSeatColSpacing, aiSeatMapWorldWidth),
+					PositionY:  baseY,
+				})
+			}
+		}
+	}
+	if len(seatInputs) == 0 {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Inferred zones had no seats"})
+	}
+
+	if err := h.seats.BulkCreateSeats(c.Context(), eventID, seatInputs); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save generated seats"})
+	}
+
+	seats, err := h.seats.GetSeatsByEventID(c.Context(), eventID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Seats saved, but failed to reload seat map"})
+	}
+	for i := range seats {
+		seats[i].Status = "AVAILABLE"
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"seats": seats, "zones": zones})
+}
+
+func clampWorld(v, max float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > max-10 {
+		return max - 10
+	}
+	return v
 }
