@@ -77,7 +77,10 @@ CREATE TABLE events (
                         venue_id UUID NOT NULL REFERENCES venues(id) ON DELETE CASCADE,
                         title VARCHAR(255) NOT NULL,
                         description TEXT,
-                        poster_url VARCHAR(512),
+                        -- TEXT, not VARCHAR(512): the admin banner uploader can store a base64
+                        -- data URI here (no object storage wired up in this project), which
+                        -- easily exceeds 512 chars for a real image.
+                        poster_url TEXT,
                         event_date TIMESTAMPTZ NOT NULL,
                         sale_start_date TIMESTAMPTZ NOT NULL,
                         sale_end_date TIMESTAMPTZ NOT NULL,

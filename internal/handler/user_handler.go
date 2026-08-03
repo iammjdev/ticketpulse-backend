@@ -1,24 +1,44 @@
 package handler
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"log"
 	"net/mail"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/iammjdev/ticketpulse-backend/internal/domain"
+	"github.com/iammjdev/ticketpulse-backend/internal/event"
 	"github.com/iammjdev/ticketpulse-backend/internal/repository"
 )
 
+// passwordResetTTL is how long an admin-triggered reset token stays valid in Redis, and what
+// the notification email tells the recipient.
+const passwordResetTTL = 15 * time.Minute
+
 type UserHandler struct {
-	users repository.UserRepository
+	users         repository.UserRepository
+	redis         repository.RedisRepository
+	resetProducer *event.Producer
 }
 
-func NewUserHandler(users repository.UserRepository) *UserHandler {
-	return &UserHandler{users: users}
+func NewUserHandler(users repository.UserRepository, redis repository.RedisRepository, resetProducer *event.Producer) *UserHandler {
+	return &UserHandler{users: users, redis: redis, resetProducer: resetProducer}
+}
+
+// generateResetToken returns a cryptographically random 32-character hex token.
+func generateResetToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func adminUserResponse(u *domain.User) fiber.Map {
@@ -254,4 +274,42 @@ func (h *UserHandler) AdminDeleteUser(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete user"})
 	}
 	return c.JSON(fiber.Map{"message": "User deleted", "id": id})
+}
+
+// AdminTriggerPasswordReset generates a reset token (TTL 15 min, stored in Redis at
+// password_reset:{userID}) and publishes PASSWORD_RESET to Kafka so the password reset
+// worker emails the user. ADMIN only.
+func (h *UserHandler) AdminTriggerPasswordReset(c *fiber.Ctx) error {
+	id := c.Params("id")
+
+	user, err := h.users.FindByID(c.Context(), id)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch user"})
+	}
+
+	token, err := generateResetToken()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate reset token"})
+	}
+
+	if err := h.redis.SetPasswordResetToken(c.Context(), user.ID, token, passwordResetTTL); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to store reset token"})
+	}
+
+	evt := event.PasswordResetEvent{
+		UserID:    user.ID,
+		Email:     user.Email,
+		Token:     token,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := h.resetProducer.PublishPasswordReset(c.Context(), evt); err != nil {
+		// Best-effort: the token is already armed in Redis, so log and report success —
+		// email delivery is a downstream concern, not a reason to fail the admin's request.
+		log.Printf("⚠️ Failed to publish PASSWORD_RESET event for user %s (Kafka may be offline): %v\n", user.ID, err)
+	}
+
+	return c.JSON(fiber.Map{"message": "Password reset email queued", "user_id": user.ID})
 }

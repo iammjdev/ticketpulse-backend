@@ -135,6 +135,13 @@ func main() {
 		log.Println("📧 SMTP_HOST not set — e-ticket emails will be logged to stdout instead of sent")
 	}
 
+	// 4c. Initialize Kafka Producer & Consumer Worker for admin-triggered password reset emails.
+	passwordResetProducer := event.NewProducer(kafkaCfg.Brokers, kafkaCfg.PasswordResetTopic)
+	defer passwordResetProducer.Close()
+
+	// Pre-warm the topic (same reasoning as the order.created/order.paid pre-warms above).
+	_ = passwordResetProducer.PublishPasswordReset(ctx, event.PasswordResetEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+
 	// 5. Initialize Handlers
 	queueHandler := handler.NewQueueHandler(redisRepo)
 
@@ -153,7 +160,7 @@ func main() {
 	newsService := service.NewNewsService(newsRepo, redisClient)
 	newsHandler := handler.NewNewsHandler(newsService)
 
-	userHandler := handler.NewUserHandler(userRepo)
+	userHandler := handler.NewUserHandler(userRepo, redisRepo, passwordResetProducer)
 	adminHandler := handler.NewAdminHandler(orderRepo, redisRepo, dbPool, kafkaCfg.Brokers[0], kafkaCfg.OrderPaidTopic, "notification-worker-group")
 	adminQueueHandler := handler.NewAdminQueueHandler(redisRepo)
 
@@ -167,6 +174,12 @@ func main() {
 		orderRepo, eventRepo, userRepo, smtpCfg,
 	)
 	go notificationWorker.Start(ctx)
+
+	passwordResetWorker := worker.NewPasswordResetWorker(
+		kafkaCfg.Brokers, kafkaCfg.PasswordResetTopic, "password-reset-worker-group",
+		userRepo, smtpCfg,
+	)
+	go passwordResetWorker.Start(ctx)
 
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
@@ -277,6 +290,7 @@ func main() {
 	admin.Put("/users/:id", userHandler.AdminEditUser)
 	admin.Patch("/users/:id/role", userHandler.AdminUpdateUser)
 	admin.Delete("/users/:id", userHandler.AdminDeleteUser)
+	admin.Post("/users/:id/reset-password-email", userHandler.AdminTriggerPasswordReset)
 
 	admin.Get("/orders", orderHandler.AdminListOrders)
 	admin.Post("/orders/:id/resend-email", orderHandler.ResendEmail)

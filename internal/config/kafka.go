@@ -9,9 +9,14 @@ import (
 // and the notification worker consumes from.
 const OrderPaidTopic = "ticketpulse.order.paid"
 
+// PasswordResetTopic is the Kafka topic the admin-triggered password reset handler publishes
+// to, and the password reset worker consumes from.
+const PasswordResetTopic = "ticketpulse.user.password_reset"
+
 type KafkaConfig struct {
-	Brokers        []string
-	OrderPaidTopic string
+	Brokers            []string
+	OrderPaidTopic     string
+	PasswordResetTopic string
 }
 
 // LoadKafkaConfig reads KAFKA_BROKERS (comma-separated, default localhost:9092). Kafka being
@@ -34,7 +39,8 @@ func LoadKafkaConfig() KafkaConfig {
 	}
 
 	return KafkaConfig{
-		Brokers:        brokers,
-		OrderPaidTopic: OrderPaidTopic,
+		Brokers:            brokers,
+		OrderPaidTopic:     OrderPaidTopic,
+		PasswordResetTopic: PasswordResetTopic,
 	}
 }

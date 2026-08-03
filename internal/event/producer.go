@@ -25,6 +25,16 @@ type OrderPaidEvent struct {
 	Timestamp  string  `json:"timestamp"`
 }
 
+// PasswordResetEvent is published to ticketpulse.user.password_reset whenever an admin
+// triggers a password reset email for a user. The reset worker treats UserID as the source of
+// truth and re-fetches the user from Postgres rather than trusting Email as final.
+type PasswordResetEvent struct {
+	UserID    string `json:"user_id"`
+	Email     string `json:"email"`
+	Token     string `json:"token"`
+	Timestamp string `json:"timestamp"`
+}
+
 // Producer wraps a Kafka writer bound to a single topic. Construction never fails on a
 // down/unreachable broker — kafka-go dials lazily on the first WriteMessages call — so a dev
 // environment without Kafka running can still boot the API; only the publish call itself
@@ -66,6 +76,30 @@ func (p *Producer) PublishOrderPaid(ctx context.Context, evt OrderPaidEvent) err
 	}
 
 	log.Printf("📢 Published ORDER_PAID to Kafka: OrderID=%s Email=%s\n", evt.OrderID, evt.Email)
+	return nil
+}
+
+// PublishPasswordReset best-effort publishes evt on a Producer bound to
+// config.PasswordResetTopic. Same non-blocking, non-fatal-on-failure contract as
+// PublishOrderPaid — email delivery is a downstream concern, never critical-path.
+func (p *Producer) PublishPasswordReset(ctx context.Context, evt PasswordResetEvent) error {
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		return fmt.Errorf("failed to marshal PASSWORD_RESET event: %w", err)
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	msg := kafka.Message{
+		Key:   []byte(evt.UserID),
+		Value: payload,
+	}
+	if err := p.writer.WriteMessages(writeCtx, msg); err != nil {
+		return fmt.Errorf("failed to publish PASSWORD_RESET event to kafka: %w", err)
+	}
+
+	log.Printf("📢 Published PASSWORD_RESET to Kafka: UserID=%s Email=%s\n", evt.UserID, evt.Email)
 	return nil
 }
 

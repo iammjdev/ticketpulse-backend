@@ -44,6 +44,11 @@ type RedisRepository interface {
 	// reservation/queue code can check it without a Postgres round trip.
 	SetEventStatus(ctx context.Context, eventID, status string) error
 
+	// SetPasswordResetToken stores an admin-triggered password reset token at
+	// password_reset:{userID} for ttl (15 minutes). Used to prove the reset link was
+	// genuinely issued and hasn't already expired.
+	SetPasswordResetToken(ctx context.Context, userID, token string, ttl time.Duration) error
+
 	// ReserveSpecificSeat atomically claims one seat (as opposed to a zone-level quantity)
 	// via the reserve_specific_seat Lua script, holding it in event:{eventID}:seat_status
 	// for ttlSeconds. Returns false if the seat is already HELD or SOLD.
@@ -234,6 +239,11 @@ func (r *redisRepository) TotalQueueLength(ctx context.Context) (int64, error) {
 func (r *redisRepository) SetEventStatus(ctx context.Context, eventID, status string) error {
 	key := fmt.Sprintf("event:%s:status", eventID)
 	return r.rdb.Set(ctx, key, status, 0).Err()
+}
+
+func (r *redisRepository) SetPasswordResetToken(ctx context.Context, userID, token string, ttl time.Duration) error {
+	key := fmt.Sprintf("password_reset:%s", userID)
+	return r.rdb.Set(ctx, key, token, ttl).Err()
 }
 
 // GetActiveHoldCount scans for every order:expire:* key (armed by SetOrderExpiry, cleared by
