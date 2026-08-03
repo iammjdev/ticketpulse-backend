@@ -38,8 +38,6 @@ type EventRepository interface {
 	// Postgres) are treated as not requiring verification.
 	RequiresIDVerification(ctx context.Context, eventID string) (bool, error)
 	ListActiveEvents(ctx context.Context) ([]*domain.EventSummary, error)
-	// ListVenues returns every venue for the admin create-event wizard's venue picker.
-	ListVenues(ctx context.Context) ([]*domain.Venue, error)
 	FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error)
 	CreateEventWithZones(ctx context.Context, venueID, title, description, bannerURL, descriptionRich string, eventDate string, status domain.EventStatus, zones []NewZone) (*domain.EventDetail, error)
 	// FindZoneName resolves a seat_zones.id to its display name (e.g. "VIP Standing") for
@@ -80,24 +78,6 @@ type eventRepository struct {
 
 func NewEventRepository(db *pgxpool.Pool) EventRepository {
 	return &eventRepository{db: db}
-}
-
-func (r *eventRepository) ListVenues(ctx context.Context) ([]*domain.Venue, error) {
-	rows, err := r.db.Query(ctx, `SELECT id, name, address, capacity FROM venues ORDER BY name ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	venues := make([]*domain.Venue, 0)
-	for rows.Next() {
-		var v domain.Venue
-		if err := rows.Scan(&v.ID, &v.Name, &v.Location, &v.Capacity); err != nil {
-			return nil, err
-		}
-		venues = append(venues, &v)
-	}
-	return venues, rows.Err()
 }
 
 func (r *eventRepository) RequiresIDVerification(ctx context.Context, eventID string) (bool, error) {

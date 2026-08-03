@@ -190,6 +190,9 @@ func main() {
 	categoryRepo := repository.NewCategoryRepository(dbPool)
 	categoryHandler := handler.NewCategoryHandler(categoryRepo)
 
+	venueRepo := repository.NewVenueRepository(dbPool)
+	venueHandler := handler.NewVenueHandler(venueRepo)
+
 	seatRepo := repository.NewSeatRepository(dbPool)
 	seatHandler := handler.NewSeatHandler(seatRepo, redisRepo, kafkaProducer, eventRepo, userRepo)
 
@@ -311,7 +314,10 @@ func main() {
 	})
 	admin.Post("/events", eventHandler.CreateEvent)
 	admin.Get("/events", eventHandler.AdminListEvents)
-	admin.Get("/venues", eventHandler.AdminListVenues)
+	admin.Get("/venues", venueHandler.AdminListVenues)
+	admin.Post("/venues", venueHandler.CreateVenue)
+	admin.Put("/venues/:id", venueHandler.UpdateVenue)
+	admin.Delete("/venues/:id", venueHandler.DeleteVenue)
 	admin.Put("/events/:id", eventHandler.AdminUpdateEventMetadata)
 	admin.Delete("/events/:id", eventHandler.AdminDeleteEvent)
 	admin.Put("/events/:id/zones", eventHandler.UpdateZones)
