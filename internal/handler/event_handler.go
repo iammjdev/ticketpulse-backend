@@ -44,6 +44,13 @@ func zoneResponse(z domain.Zone) fiber.Map {
 	}
 }
 
+func categorySummaryResponse(cat *domain.Category) fiber.Map {
+	if cat == nil {
+		return nil
+	}
+	return fiber.Map{"id": cat.ID, "name": cat.Name, "slug": cat.Slug}
+}
+
 func eventDetailResponse(d *domain.EventDetail) fiber.Map {
 	zones := make([]fiber.Map, 0, len(d.Zones))
 	for _, z := range d.Zones {
@@ -58,11 +65,14 @@ func eventDetailResponse(d *domain.EventDetail) fiber.Map {
 		"event_date":               d.EventDate,
 		"status":                   d.Status,
 		"requires_id_verification": d.RequiresIDVerification,
+		"category":                 categorySummaryResponse(d.Category),
 		"venue": fiber.Map{
 			"id":       d.Venue.ID,
 			"name":     d.Venue.Name,
 			"location": d.Venue.Location,
 			"capacity": d.Venue.Capacity,
+			"city":     d.Venue.City,
+			"map_url":  d.Venue.MapURL,
 		},
 		"zones": zones,
 	}
@@ -105,6 +115,7 @@ type createZoneRequest struct {
 
 type createEventRequest struct {
 	VenueID         string              `json:"venue_id"`
+	CategoryID      string              `json:"category_id"`
 	Title           string              `json:"title"`
 	Description     string              `json:"description"`
 	BannerURL       string              `json:"banner_url"`
@@ -156,7 +167,7 @@ func (h *EventHandler) CreateEvent(c *fiber.Ctx) error {
 		})
 	}
 
-	event, err := h.events.CreateEventWithZones(c.Context(), req.VenueID, req.Title, req.Description, req.BannerURL, req.DescriptionRich, req.EventDate, status, zones)
+	event, err := h.events.CreateEventWithZones(c.Context(), req.VenueID, req.CategoryID, req.Title, req.Description, req.BannerURL, req.DescriptionRich, req.EventDate, status, zones)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create event"})
 	}
@@ -183,6 +194,7 @@ func adminEventSummaryResponse(e *domain.AdminEventSummary) fiber.Map {
 		"status":         e.Status,
 		"venue_name":     e.VenueName,
 		"venue_location": e.VenueLocation,
+		"category":       categorySummaryResponse(e.Category),
 		"total_capacity": e.TotalCapacity,
 		"tickets_sold":   e.TicketsSold,
 		"revenue":        e.Revenue,
@@ -336,6 +348,7 @@ func (h *EventHandler) UpdateEventStatus(c *fiber.Ctx) error {
 
 type updateEventMetadataRequest struct {
 	VenueID                string `json:"venue_id"`
+	CategoryID             string `json:"category_id"`
 	Title                  string `json:"title"`
 	Description            string `json:"description"`
 	BannerURL              string `json:"banner_url"`
@@ -364,6 +377,7 @@ func (h *EventHandler) AdminUpdateEventMetadata(c *fiber.Ctx) error {
 
 	event, err := h.events.UpdateEventMetadata(c.Context(), eventID, repository.UpdateEventInput{
 		VenueID:                venueID,
+		CategoryID:             strings.TrimSpace(req.CategoryID),
 		Title:                  title,
 		Description:            req.Description,
 		BannerURL:              req.BannerURL,

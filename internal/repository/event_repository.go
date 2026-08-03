@@ -39,7 +39,7 @@ type EventRepository interface {
 	RequiresIDVerification(ctx context.Context, eventID string) (bool, error)
 	ListActiveEvents(ctx context.Context) ([]*domain.EventSummary, error)
 	FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error)
-	CreateEventWithZones(ctx context.Context, venueID, title, description, bannerURL, descriptionRich string, eventDate string, status domain.EventStatus, zones []NewZone) (*domain.EventDetail, error)
+	CreateEventWithZones(ctx context.Context, venueID, categoryID, title, description, bannerURL, descriptionRich string, eventDate string, status domain.EventStatus, zones []NewZone) (*domain.EventDetail, error)
 	// FindZoneName resolves a seat_zones.id to its display name (e.g. "VIP Standing") for
 	// e-ticket email rendering. Returns "" (no error) if zoneID doesn't match a row — orders
 	// created via the /tickets/reserve dev fallback path may carry a placeholder zone id.
@@ -64,6 +64,7 @@ type EventRepository interface {
 // UpdateEventInput carries the editable fields for PUT /admin/events/:id.
 type UpdateEventInput struct {
 	VenueID                string
+	CategoryID             string
 	Title                  string
 	Description            string
 	BannerURL              string
@@ -127,16 +128,21 @@ func (r *eventRepository) ListActiveEvents(ctx context.Context) ([]*domain.Event
 func (r *eventRepository) FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error) {
 	query := `
 		SELECT e.id, e.title, e.description, e.poster_url, e.description_rich, e.event_date, e.status, e.requires_id_verification,
-		       v.id, v.name, v.address, v.capacity
+		       v.id, v.name, v.address, v.capacity, v.city, v.map_url,
+		       c.id, c.name, c.slug
 		FROM events e
 		JOIN venues v ON e.venue_id = v.id
+		LEFT JOIN categories c ON e.category_id = c.id
 		WHERE e.id = $1 AND e.deleted_at IS NULL
 	`
 	var d domain.EventDetail
 	var description, bannerURL, descriptionRich *string
+	var venueCity, venueMapURL *string
+	var categoryID, categoryName, categorySlug *string
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&d.ID, &d.Title, &description, &bannerURL, &descriptionRich, &d.EventDate, &d.Status, &d.RequiresIDVerification,
-		&d.Venue.ID, &d.Venue.Name, &d.Venue.Location, &d.Venue.Capacity,
+		&d.Venue.ID, &d.Venue.Name, &d.Venue.Location, &d.Venue.Capacity, &venueCity, &venueMapURL,
+		&categoryID, &categoryName, &categorySlug,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -152,6 +158,15 @@ func (r *eventRepository) FindEventByID(ctx context.Context, id string) (*domain
 	}
 	if descriptionRich != nil {
 		d.DescriptionRich = *descriptionRich
+	}
+	if venueCity != nil {
+		d.Venue.City = *venueCity
+	}
+	if venueMapURL != nil {
+		d.Venue.MapURL = *venueMapURL
+	}
+	if categoryID != nil {
+		d.Category = &domain.Category{ID: *categoryID, Name: *categoryName, Slug: *categorySlug}
 	}
 
 	zones, err := r.findZonesByEventID(ctx, id)
@@ -199,7 +214,7 @@ func (r *eventRepository) FindZoneName(ctx context.Context, zoneID string) (stri
 
 func (r *eventRepository) CreateEventWithZones(
 	ctx context.Context,
-	venueID, title, description, bannerURL, descriptionRich string,
+	venueID, categoryID, title, description, bannerURL, descriptionRich string,
 	eventDate string,
 	status domain.EventStatus,
 	zones []NewZone,
@@ -212,10 +227,10 @@ func (r *eventRepository) CreateEventWithZones(
 
 	var eventID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO events (venue_id, title, description, poster_url, description_rich, event_date, sale_start_date, sale_end_date, status)
-		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, CURRENT_TIMESTAMP, $6, $7)
+		INSERT INTO events (venue_id, category_id, title, description, poster_url, description_rich, event_date, sale_start_date, sale_end_date, status)
+		VALUES ($1, NULLIF($2, '')::uuid, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, CURRENT_TIMESTAMP, $7, $8)
 		RETURNING id
-	`, venueID, title, description, bannerURL, descriptionRich, eventDate, status).Scan(&eventID)
+	`, venueID, categoryID, title, description, bannerURL, descriptionRich, eventDate, status).Scan(&eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -266,9 +281,11 @@ func (r *eventRepository) ListAdminEvents(ctx context.Context, filter AdminEvent
 	offsetArg := nextArg(offset)
 	query := `
 		SELECT e.id, e.title, e.poster_url, e.event_date, e.status, v.name, v.address,
-		       COALESCE(zt.total_capacity, 0), COALESCE(ot.tickets_sold, 0), COALESCE(ot.revenue, 0)
+		       COALESCE(zt.total_capacity, 0), COALESCE(ot.tickets_sold, 0), COALESCE(ot.revenue, 0),
+		       c.id, c.name, c.slug
 		FROM events e
 		JOIN venues v ON e.venue_id = v.id
+		LEFT JOIN categories c ON e.category_id = c.id
 		LEFT JOIN (
 			SELECT event_id, SUM(total_capacity) AS total_capacity
 			FROM seat_zones GROUP BY event_id
@@ -291,14 +308,19 @@ func (r *eventRepository) ListAdminEvents(ctx context.Context, filter AdminEvent
 	for rows.Next() {
 		var e domain.AdminEventSummary
 		var bannerURL *string
+		var categoryID, categoryName, categorySlug *string
 		if err := rows.Scan(
 			&e.ID, &e.Title, &bannerURL, &e.EventDate, &e.Status, &e.VenueName, &e.VenueLocation,
 			&e.TotalCapacity, &e.TicketsSold, &e.Revenue,
+			&categoryID, &categoryName, &categorySlug,
 		); err != nil {
 			return nil, 0, err
 		}
 		if bannerURL != nil {
 			e.BannerURL = *bannerURL
+		}
+		if categoryID != nil {
+			e.Category = &domain.Category{ID: *categoryID, Name: *categoryName, Slug: *categorySlug}
 		}
 		events = append(events, &e)
 	}
@@ -344,10 +366,10 @@ func (r *eventRepository) UpdateEventStatus(ctx context.Context, eventID string,
 func (r *eventRepository) UpdateEventMetadata(ctx context.Context, eventID string, input UpdateEventInput) (*domain.EventDetail, error) {
 	tag, err := r.db.Exec(ctx, `
 		UPDATE events
-		SET venue_id = $2, title = $3, description = NULLIF($4, ''), poster_url = NULLIF($5, ''),
-		    description_rich = $6, event_date = $7, requires_id_verification = $8, updated_at = NOW()
+		SET venue_id = $2, category_id = NULLIF($3, '')::uuid, title = $4, description = NULLIF($5, ''), poster_url = NULLIF($6, ''),
+		    description_rich = $7, event_date = $8, requires_id_verification = $9, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
-	`, eventID, input.VenueID, input.Title, input.Description, input.BannerURL, input.DescriptionRich, input.EventDate, input.RequiresIDVerification)
+	`, eventID, input.VenueID, input.CategoryID, input.Title, input.Description, input.BannerURL, input.DescriptionRich, input.EventDate, input.RequiresIDVerification)
 	if err != nil {
 		return nil, err
 	}
