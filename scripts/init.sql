@@ -97,6 +97,46 @@ CREATE TABLE events (
 
 ALTER TABLE events ADD COLUMN IF NOT EXISTS description_rich TEXT NOT NULL DEFAULT '';
 
+-- ==========================================
+-- CATEGORIES (Dynamic Category & Venue Management)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL UNIQUE,
+    slug VARCHAR(120) NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_categories_slug ON categories(slug);
+
+INSERT INTO categories (id, name, slug) VALUES
+    ('b1111111-1111-1111-1111-111111111111', 'Concert', 'concert'),
+    ('b2222222-2222-2222-2222-222222222222', 'Sports', 'sports'),
+    ('b3333333-3333-3333-3333-333333333333', 'Theatre & Arts', 'theatre-arts'),
+    ('b4444444-4444-4444-4444-444444444444', 'Festival', 'festival'),
+    ('b5555555-5555-5555-5555-555555555555', 'Workshop', 'workshop'),
+    ('b6666666-6666-6666-6666-666666666666', 'Exhibition', 'exhibition')
+ON CONFLICT (id) DO NOTHING;
+
+-- Extend venues with city/map_url (idempotent — safe to re-run against an existing DB).
+ALTER TABLE venues ADD COLUMN IF NOT EXISTS city VARCHAR(255);
+ALTER TABLE venues ADD COLUMN IF NOT EXISTS map_url TEXT;
+
+-- Backfill the 4 seeded venues on databases that already had this table before this change.
+UPDATE venues SET city = 'Bangkok', map_url = 'https://maps.google.com/?q=Rajamangala+National+Stadium' WHERE id = 'a1111111-1111-1111-1111-111111111111' AND city IS NULL;
+UPDATE venues SET city = 'Nonthaburi', map_url = 'https://maps.google.com/?q=Impact+Arena+Muang+Thong+Thani' WHERE id = 'a2222222-2222-2222-2222-222222222222' AND city IS NULL;
+UPDATE venues SET city = 'Bangkok', map_url = 'https://maps.google.com/?q=Thailand+Cultural+Centre' WHERE id = 'a3333333-3333-3333-3333-333333333333' AND city IS NULL;
+UPDATE venues SET city = 'Chonburi', map_url = 'https://maps.google.com/?q=The+Fields+Siam+Country+Club' WHERE id = 'a4444444-4444-4444-4444-444444444444' AND city IS NULL;
+
+-- Add category_id to events, nullable and ON DELETE SET NULL — category is optional metadata,
+-- unlike venue_id, so deleting a category should never block or cascade into event deletion.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS category_id UUID REFERENCES categories(id) ON DELETE SET NULL;
+
+-- Backfill the 6 seeded events with a sensible category for demo realism.
+UPDATE events SET category_id = 'b1111111-1111-1111-1111-111111111111' WHERE id IN ('11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222','66666666-6666-6666-6666-666666666666') AND category_id IS NULL;
+UPDATE events SET category_id = 'b2222222-2222-2222-2222-222222222222' WHERE id = '33333333-3333-3333-3333-333333333333' AND category_id IS NULL;
+UPDATE events SET category_id = 'b3333333-3333-3333-3333-333333333333' WHERE id = '44444444-4444-4444-4444-444444444444' AND category_id IS NULL;
+UPDATE events SET category_id = 'b4444444-4444-4444-4444-444444444444' WHERE id = '55555555-5555-5555-5555-555555555555' AND category_id IS NULL;
+
 -- Seed demo venues & events — ids match the static catalog in
 -- ticketpulse-frontend/src/lib/events.ts so reservations/orders resolve correctly.
 -- NOVA BLACK's World Tour (high-demand) requires ID verification before booking.
