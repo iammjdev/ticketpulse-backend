@@ -43,10 +43,13 @@ type EventSummary struct {
 // EventDetail is the full shape returned by GET /api/v1/events/:id, joined with its venue
 // and ticket zones.
 type EventDetail struct {
-	ID                     string      `json:"id"`
-	Title                  string      `json:"title"`
-	Description            string      `json:"description"`
-	BannerURL              string      `json:"banner_url"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	BannerURL   string `json:"banner_url"`
+	// DescriptionRich is a JSON blob ({overview, lineup, schedule, rules, faq}) rendered as
+	// tabs on the public event page — empty string means no rich content has been set.
+	DescriptionRich        string      `json:"description_rich"`
 	EventDate              time.Time   `json:"event_date"`
 	Status                 EventStatus `json:"status"`
 	RequiresIDVerification bool        `json:"requires_id_verification"`

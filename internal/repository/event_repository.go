@@ -41,7 +41,7 @@ type EventRepository interface {
 	// ListVenues returns every venue for the admin create-event wizard's venue picker.
 	ListVenues(ctx context.Context) ([]*domain.Venue, error)
 	FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error)
-	CreateEventWithZones(ctx context.Context, venueID, title, description, bannerURL string, eventDate string, status domain.EventStatus, zones []NewZone) (*domain.EventDetail, error)
+	CreateEventWithZones(ctx context.Context, venueID, title, description, bannerURL, descriptionRich string, eventDate string, status domain.EventStatus, zones []NewZone) (*domain.EventDetail, error)
 	// FindZoneName resolves a seat_zones.id to its display name (e.g. "VIP Standing") for
 	// e-ticket email rendering. Returns "" (no error) if zoneID doesn't match a row — orders
 	// created via the /tickets/reserve dev fallback path may carry a placeholder zone id.
@@ -69,6 +69,7 @@ type UpdateEventInput struct {
 	Title                  string
 	Description            string
 	BannerURL              string
+	DescriptionRich        string
 	EventDate              string
 	RequiresIDVerification bool
 }
@@ -145,16 +146,16 @@ func (r *eventRepository) ListActiveEvents(ctx context.Context) ([]*domain.Event
 
 func (r *eventRepository) FindEventByID(ctx context.Context, id string) (*domain.EventDetail, error) {
 	query := `
-		SELECT e.id, e.title, e.description, e.poster_url, e.event_date, e.status, e.requires_id_verification,
+		SELECT e.id, e.title, e.description, e.poster_url, e.description_rich, e.event_date, e.status, e.requires_id_verification,
 		       v.id, v.name, v.address, v.capacity
 		FROM events e
 		JOIN venues v ON e.venue_id = v.id
 		WHERE e.id = $1 AND e.deleted_at IS NULL
 	`
 	var d domain.EventDetail
-	var description, bannerURL *string
+	var description, bannerURL, descriptionRich *string
 	err := r.db.QueryRow(ctx, query, id).Scan(
-		&d.ID, &d.Title, &description, &bannerURL, &d.EventDate, &d.Status, &d.RequiresIDVerification,
+		&d.ID, &d.Title, &description, &bannerURL, &descriptionRich, &d.EventDate, &d.Status, &d.RequiresIDVerification,
 		&d.Venue.ID, &d.Venue.Name, &d.Venue.Location, &d.Venue.Capacity,
 	)
 	if err != nil {
@@ -168,6 +169,9 @@ func (r *eventRepository) FindEventByID(ctx context.Context, id string) (*domain
 	}
 	if bannerURL != nil {
 		d.BannerURL = *bannerURL
+	}
+	if descriptionRich != nil {
+		d.DescriptionRich = *descriptionRich
 	}
 
 	zones, err := r.findZonesByEventID(ctx, id)
@@ -215,7 +219,7 @@ func (r *eventRepository) FindZoneName(ctx context.Context, zoneID string) (stri
 
 func (r *eventRepository) CreateEventWithZones(
 	ctx context.Context,
-	venueID, title, description, bannerURL string,
+	venueID, title, description, bannerURL, descriptionRich string,
 	eventDate string,
 	status domain.EventStatus,
 	zones []NewZone,
@@ -228,10 +232,10 @@ func (r *eventRepository) CreateEventWithZones(
 
 	var eventID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO events (venue_id, title, description, poster_url, event_date, sale_start_date, sale_end_date, status)
-		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, CURRENT_TIMESTAMP, $5, $6)
+		INSERT INTO events (venue_id, title, description, poster_url, description_rich, event_date, sale_start_date, sale_end_date, status)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, CURRENT_TIMESTAMP, $6, $7)
 		RETURNING id
-	`, venueID, title, description, bannerURL, eventDate, status).Scan(&eventID)
+	`, venueID, title, description, bannerURL, descriptionRich, eventDate, status).Scan(&eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -361,9 +365,9 @@ func (r *eventRepository) UpdateEventMetadata(ctx context.Context, eventID strin
 	tag, err := r.db.Exec(ctx, `
 		UPDATE events
 		SET venue_id = $2, title = $3, description = NULLIF($4, ''), poster_url = NULLIF($5, ''),
-		    event_date = $6, requires_id_verification = $7, updated_at = NOW()
+		    description_rich = $6, event_date = $7, requires_id_verification = $8, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
-	`, eventID, input.VenueID, input.Title, input.Description, input.BannerURL, input.EventDate, input.RequiresIDVerification)
+	`, eventID, input.VenueID, input.Title, input.Description, input.BannerURL, input.DescriptionRich, input.EventDate, input.RequiresIDVerification)
 	if err != nil {
 		return nil, err
 	}
