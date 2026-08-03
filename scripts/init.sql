@@ -81,6 +81,10 @@ CREATE TABLE events (
                         -- data URI here (no object storage wired up in this project), which
                         -- easily exceeds 512 chars for a real image.
                         poster_url TEXT,
+                        -- JSON blob: { overview, lineup[], schedule[], rules, faq[] } — optional
+                        -- Step 4 "Rich Content & Media" wizard data, rendered as tabs on the
+                        -- public event page. Empty string means no rich content set yet.
+                        description_rich TEXT NOT NULL DEFAULT '',
                         event_date TIMESTAMPTZ NOT NULL,
                         sale_start_date TIMESTAMPTZ NOT NULL,
                         sale_end_date TIMESTAMPTZ NOT NULL,
@@ -90,6 +94,8 @@ CREATE TABLE events (
                         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                         deleted_at TIMESTAMPTZ
 );
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS description_rich TEXT NOT NULL DEFAULT '';
 
 -- Seed demo venues & events — ids match the static catalog in
 -- ticketpulse-frontend/src/lib/events.ts so reservations/orders resolve correctly.
