@@ -54,6 +54,7 @@ func eventDetailResponse(d *domain.EventDetail) fiber.Map {
 		"title":                    d.Title,
 		"description":              d.Description,
 		"banner_url":               d.BannerURL,
+		"description_rich":         d.DescriptionRich,
 		"event_date":               d.EventDate,
 		"status":                   d.Status,
 		"requires_id_verification": d.RequiresIDVerification,
@@ -103,13 +104,14 @@ type createZoneRequest struct {
 }
 
 type createEventRequest struct {
-	VenueID     string              `json:"venue_id"`
-	Title       string              `json:"title"`
-	Description string              `json:"description"`
-	BannerURL   string              `json:"banner_url"`
-	EventDate   string              `json:"event_date"`
-	Status      string              `json:"status"`
-	Zones       []createZoneRequest `json:"zones"`
+	VenueID         string              `json:"venue_id"`
+	Title           string              `json:"title"`
+	Description     string              `json:"description"`
+	BannerURL       string              `json:"banner_url"`
+	DescriptionRich string              `json:"description_rich"`
+	EventDate       string              `json:"event_date"`
+	Status          string              `json:"status"`
+	Zones           []createZoneRequest `json:"zones"`
 }
 
 // CreateEvent creates a new event with its ticket zones and immediately pre-warms each
@@ -154,7 +156,7 @@ func (h *EventHandler) CreateEvent(c *fiber.Ctx) error {
 		})
 	}
 
-	event, err := h.events.CreateEventWithZones(c.Context(), req.VenueID, req.Title, req.Description, req.BannerURL, req.EventDate, status, zones)
+	event, err := h.events.CreateEventWithZones(c.Context(), req.VenueID, req.Title, req.Description, req.BannerURL, req.DescriptionRich, req.EventDate, status, zones)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create event"})
 	}
@@ -346,6 +348,7 @@ type updateEventMetadataRequest struct {
 	Title                  string `json:"title"`
 	Description            string `json:"description"`
 	BannerURL              string `json:"banner_url"`
+	DescriptionRich        string `json:"description_rich"`
 	EventDate              string `json:"event_date"`
 	RequiresIDVerification bool   `json:"requires_id_verification"`
 }
@@ -373,6 +376,7 @@ func (h *EventHandler) AdminUpdateEventMetadata(c *fiber.Ctx) error {
 		Title:                  title,
 		Description:            req.Description,
 		BannerURL:              req.BannerURL,
+		DescriptionRich:        req.DescriptionRich,
 		EventDate:              eventDate,
 		RequiresIDVerification: req.RequiresIDVerification,
 	})
