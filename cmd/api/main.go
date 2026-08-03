@@ -7,12 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
@@ -28,13 +28,45 @@ import (
 	"github.com/iammjdev/ticketpulse-backend/pkg/messaging"
 )
 
+const (
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+	ansiReset  = "\033[0m"
+)
+
+// statusLine prints a compact, aligned startup status entry: HH:mm:ss [TAG]  <indicator> label  detail
+func statusLine(tag, indicator, color, label, detail string) {
+	fmt.Printf("%s [%s]  %s%s%s %-16s %s\n",
+		time.Now().Format("15:04:05"), tag, color, indicator, ansiReset, label, detail)
+}
+
+func ok(tag, label, detail string) {
+	statusLine(tag, "✔", ansiGreen, label, detail)
+}
+
+func warn(tag, label, detail string) {
+	statusLine(tag, "⚠", ansiYellow, label, detail)
+}
+
+// printBanner renders a compact header box announcing the bound address before the server
+// starts accepting connections, replacing Fiber's default startup banner.
+func printBanner(port string) {
+	title := "⚡ TicketPulse Enterprise Engine v1.0"
+	addr := fmt.Sprintf("http://127.0.0.1:%s (bound on 0.0.0.0:%s)", port, port)
+	width := 75
+	fmt.Println("┌" + strings.Repeat("─", width) + "┐")
+	fmt.Printf("│  %-*s│\n", width-3, title)
+	fmt.Printf("│  %-*s│\n", width-2, addr)
+	fmt.Println("└" + strings.Repeat("─", width) + "┘")
+}
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// 0. Load Environment Variables from .env file
 	if err := godotenv.Load(); err != nil {
-		log.Println("⚠️ No .env file found, reading from system environment variables")
+		warn("SYS", "Env File", "not found, reading from system environment variables")
 	}
 
 	// Helper function for ENV defaults
@@ -65,7 +97,7 @@ func main() {
 	if err := dbPool.Ping(ctx); err != nil {
 		log.Fatalf("❌ PostgreSQL Ping failed: %v\n", err)
 	}
-	log.Println("🐘 PostgreSQL Connection Pool established successfully!")
+	ok("SYS", "PostgreSQL", fmt.Sprintf("connected  (%s:%s/%s)", dbHost, dbPort, dbName))
 
 	// 2. Initialize Redis Client
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
@@ -77,7 +109,7 @@ func main() {
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		log.Fatalf("❌ Redis Ping failed: %v\n", err)
 	}
-	log.Println("🔴 Redis Connection established successfully!")
+	ok("SYS", "Redis", fmt.Sprintf("connected  (%s)", redisAddr))
 
 	// 3. Initialize Redis Repository
 	redisRepo, err := repository.NewRedisRepository(
@@ -102,15 +134,7 @@ func main() {
 	defer kafkaProducer.Close()
 
 	// Pre-warm Kafka Topic
-	_ = kafkaProducer.PublishOrderCreated(ctx, messaging.OrderCreatedEvent{
-		OrderID:   uuid.New().String(),
-		EventID:   "11111111-1111-1111-1111-111111111111",
-		ZoneID:    "22222222-2222-2222-2222-222222222222",
-		UserID:    "33333333-3333-3333-3333-333333333333",
-		Quantity:  0,
-		Price:     0.0,
-		Timestamp: time.Now(),
-	})
+	kafkaErr := kafkaProducer.WarmupTopic(ctx)
 
 	// Initialize & Run Order Processing Worker in Background Goroutine
 	orderWorker := worker.NewOrderWorker(kafkaBrokers, kafkaTopic, "order-worker-group", dbPool, redisRepo)
@@ -126,13 +150,15 @@ func main() {
 	// Pre-warm the ticketpulse.order.paid topic (same reasoning as the order.created pre-warm
 	// above): without this, the NotificationWorker's consumer group can start before the topic
 	// exists and miss the first real publish while Kafka lazily creates it.
-	_ = notificationProducer.PublishOrderPaid(ctx, event.OrderPaidEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	if err := notificationProducer.Warmup(ctx); err != nil {
+		kafkaErr = err
+	}
 
 	smtpCfg := config.LoadSMTPConfig()
 	if smtpCfg.Enabled {
-		log.Printf("📧 SMTP configured (%s:%s) — e-ticket emails will be sent for real\n", smtpCfg.Host, smtpCfg.Port)
+		ok("SYS", "SMTP", fmt.Sprintf("%s:%s — sending real e-ticket emails", smtpCfg.Host, smtpCfg.Port))
 	} else {
-		log.Println("📧 SMTP_HOST not set — e-ticket emails will be logged to stdout instead of sent")
+		warn("SYS", "SMTP", "not configured — e-ticket emails logged to stdout")
 	}
 
 	// 4c. Initialize Kafka Producer & Consumer Worker for admin-triggered password reset emails.
@@ -140,7 +166,15 @@ func main() {
 	defer passwordResetProducer.Close()
 
 	// Pre-warm the topic (same reasoning as the order.created/order.paid pre-warms above).
-	_ = passwordResetProducer.PublishPasswordReset(ctx, event.PasswordResetEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	if err := passwordResetProducer.Warmup(ctx); err != nil {
+		kafkaErr = err
+	}
+
+	if kafkaErr != nil {
+		warn("SYS", "Kafka", fmt.Sprintf("broker unreachable (%s) — workers will retry lazily", kafkaCfg.Brokers[0]))
+	} else {
+		ok("SYS", "Kafka", fmt.Sprintf("connected  (%s)", kafkaCfg.Brokers[0]))
+	}
 
 	// 5. Initialize Handlers
 	queueHandler := handler.NewQueueHandler(redisRepo)
@@ -181,9 +215,12 @@ func main() {
 	)
 	go passwordResetWorker.Start(ctx)
 
+	ok("WRK", "Kafka Workers", "active [expiration, order_processor, notification, pwd_reset]")
+
 	// 6. Initialize Fiber App Engine
 	app := fiber.New(fiber.Config{
-		AppName: "TicketPulse Enterprise Engine v1.0",
+		AppName:               "TicketPulse Enterprise Engine v1.0",
+		DisableStartupMessage: true,
 	})
 
 	app.Use(cors.New(cors.Config{
@@ -315,8 +352,10 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	serverPort := getEnv("PORT", "8080")
+	fmt.Println()
+	printBanner(serverPort)
+	fmt.Println()
 	go func() {
-		log.Printf("🚀 TicketPulse API Server starting on :%s...\n", serverPort)
 		if err := app.Listen(":" + serverPort); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("❌ Server error: %v\n", err)
 		}

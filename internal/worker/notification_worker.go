@@ -60,8 +60,6 @@ func NewNotificationWorker(
 }
 
 func (w *NotificationWorker) Start(ctx context.Context) {
-	log.Println("📬 Notification Worker initialized and listening for ORDER_PAID events...")
-
 	for {
 		select {
 		case <-ctx.Done():

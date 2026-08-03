@@ -79,8 +79,6 @@ func ensureTopicExists(brokers []string, topic string) {
 }
 
 func (w *PasswordResetWorker) Start(ctx context.Context) {
-	log.Println("🔑 Password Reset Worker initialized and listening for PASSWORD_RESET events...")
-
 	for {
 		select {
 		case <-ctx.Done():

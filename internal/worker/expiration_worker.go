@@ -36,8 +36,6 @@ func (w *ExpirationWorker) Start(ctx context.Context) {
 	pubsub := w.redisClient.Subscribe(ctx, "__keyevent@0__:expired")
 	defer pubsub.Close()
 
-	log.Println("⏳ TicketPulse Expiration Worker active (seat holds + unpaid orders)...")
-
 	ch := pubsub.Channel()
 	for {
 		select {

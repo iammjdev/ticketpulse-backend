@@ -103,6 +103,14 @@ func (p *Producer) PublishPasswordReset(ctx context.Context, evt PasswordResetEv
 	return nil
 }
 
+// Warmup forces kafka-go to dial and auto-create the bound topic without emitting an
+// operational log line — used at startup so the first real publish doesn't race topic creation.
+func (p *Producer) Warmup(ctx context.Context) error {
+	writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return p.writer.WriteMessages(writeCtx, kafka.Message{Value: []byte("{}")})
+}
+
 func (p *Producer) Close() error {
 	return p.writer.Close()
 }

@@ -54,6 +54,12 @@ func (p *KafkaProducer) PublishOrderCreated(ctx context.Context, event OrderCrea
 	return nil
 }
 
+// WarmupTopic forces kafka-go to dial and auto-create the bound topic without emitting an
+// operational log line — used at startup so the first real publish doesn't race topic creation.
+func (p *KafkaProducer) WarmupTopic(ctx context.Context) error {
+	return p.writer.WriteMessages(ctx, kafka.Message{Value: []byte("{}")})
+}
+
 func (p *KafkaProducer) Close() error {
 	return p.writer.Close()
 }

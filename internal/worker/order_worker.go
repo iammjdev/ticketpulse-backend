@@ -53,8 +53,6 @@ func NewOrderWorker(brokers []string, topic string, groupID string, db *pgxpool.
 }
 
 func (w *OrderWorker) Start(ctx context.Context) {
-	log.Println("⚙️ Order Processing Worker initialized and listening to Kafka topic...")
-
 	for {
 		select {
 		case <-ctx.Done():
