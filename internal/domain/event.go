@@ -17,6 +17,8 @@ type Venue struct {
 	Name     string `json:"name"`
 	Location string `json:"location"`
 	Capacity int    `json:"capacity"`
+	City     string `json:"city"`
+	MapURL   string `json:"map_url"`
 }
 
 type Zone struct {
@@ -53,6 +55,7 @@ type EventDetail struct {
 	EventDate              time.Time   `json:"event_date"`
 	Status                 EventStatus `json:"status"`
 	RequiresIDVerification bool        `json:"requires_id_verification"`
+	Category               *Category   `json:"category"`
 	Venue                  Venue       `json:"venue"`
 	Zones                  []Zone      `json:"zones"`
 }
@@ -68,6 +71,7 @@ type AdminEventSummary struct {
 	Status        EventStatus `json:"status"`
 	VenueName     string      `json:"venue_name"`
 	VenueLocation string      `json:"venue_location"`
+	Category      *Category   `json:"category"`
 	TotalCapacity int         `json:"total_capacity"`
 	TicketsSold   int         `json:"tickets_sold"`
 	Revenue       float64     `json:"revenue"`
