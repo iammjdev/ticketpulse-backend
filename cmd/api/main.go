@@ -279,6 +279,8 @@ func main() {
 	admin.Delete("/users/:id", userHandler.AdminDeleteUser)
 
 	admin.Get("/orders", orderHandler.AdminListOrders)
+	admin.Post("/orders/:id/resend-email", orderHandler.ResendEmail)
+	admin.Post("/orders/:id/cancel", orderHandler.AdminCancelOrder)
 
 	admin.Get("/stats", adminHandler.Stats)
 	admin.Get("/dashboard/sales-series", adminHandler.SalesSeries)

@@ -20,11 +20,16 @@ var (
 	ErrOrderCancelled   = errors.New("ticket has been cancelled")
 )
 
-// AdminOrderListFilter narrows GET /admin/orders queries.
+// AdminOrderListFilter narrows GET /admin/orders queries. StartDate/EndDate are an
+// already-resolved [StartDate, EndDate) half-open range — the handler owns parsing
+// YYYY-MM-DD query params into it.
 type AdminOrderListFilter struct {
-	Status string
-	Page   int
-	Limit  int
+	Status    string
+	Search    string
+	StartDate *time.Time
+	EndDate   *time.Time
+	Page      int
+	Limit     int
 }
 
 type OrderRepository interface {
@@ -45,6 +50,10 @@ type OrderRepository interface {
 	// ListAdminOrders returns every order regardless of user, joined with the placing user and
 	// event, optionally filtered by status and paginated. ADMIN only.
 	ListAdminOrders(ctx context.Context, filter AdminOrderListFilter) ([]*domain.AdminOrderSummary, int, error)
+	// AdminCancelOrder transitions a PENDING or COMPLETED order to CANCELLED — broader than
+	// CancelIfPending, which only the expiration worker uses. wasActive is false when the order
+	// was already CHECKED_IN, CANCELLED, or EXPIRED (nothing to release in that case).
+	AdminCancelOrder(ctx context.Context, id string) (order *domain.Order, wasActive bool, err error)
 	// GateScanVelocity counts orders checked in within the trailing 60 seconds — a live
 	// scans-per-minute reading for the admin dashboard's gate scan velocity KPI.
 	GateScanVelocity(ctx context.Context) (int, error)
@@ -186,6 +195,21 @@ func (r *orderRepository) MarkPaid(ctx context.Context, id string) (*domain.Orde
 func (r *orderRepository) CancelIfPending(ctx context.Context, id string) (*domain.Order, bool, error) {
 	tag, err := r.db.Exec(ctx, `
 		UPDATE orders SET status = 'CANCELLED', updated_at = NOW() WHERE id = $1 AND status = 'PENDING'
+	`, id)
+	if err != nil {
+		return nil, false, err
+	}
+	order, err := r.FindByID(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return order, tag.RowsAffected() > 0, nil
+}
+
+func (r *orderRepository) AdminCancelOrder(ctx context.Context, id string) (*domain.Order, bool, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE orders SET status = 'CANCELLED', updated_at = NOW()
+		WHERE id = $1 AND status IN ('PENDING', 'COMPLETED')
 	`, id)
 	if err != nil {
 		return nil, false, err
@@ -346,9 +370,25 @@ func (r *orderRepository) ListAdminOrders(ctx context.Context, filter AdminOrder
 	if filter.Status != "" {
 		where += " AND o.status = " + nextArg(filter.Status)
 	}
+	if filter.Search != "" {
+		arg := nextArg("%" + filter.Search + "%")
+		where += " AND (o.id::text ILIKE " + arg + " OR u.email ILIKE " + arg + " OR u.full_name ILIKE " + arg + " OR e.title ILIKE " + arg + ")"
+	}
+	if filter.StartDate != nil {
+		where += " AND o.created_at >= " + nextArg(*filter.StartDate)
+	}
+	if filter.EndDate != nil {
+		where += " AND o.created_at < " + nextArg(*filter.EndDate)
+	}
 
 	var total int
-	if err := r.db.QueryRow(ctx, "SELECT count(*) FROM orders o "+where, args...).Scan(&total); err != nil {
+	countQuery := `
+		SELECT count(*)
+		FROM orders o
+		LEFT JOIN users u ON o.user_id = u.id
+		LEFT JOIN events e ON o.event_id = e.id
+	` + where
+	if err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 

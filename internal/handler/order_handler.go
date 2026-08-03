@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -207,6 +208,24 @@ func (h *OrderHandler) AdminListOrders(c *fiber.Ctx) error {
 		}
 		filter.Status = statusParam
 	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		filter.Search = search
+	}
+	if startParam := strings.TrimSpace(c.Query("start_date")); startParam != "" {
+		t, err := time.Parse("2006-01-02", startParam)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "start_date must be YYYY-MM-DD"})
+		}
+		filter.StartDate = &t
+	}
+	if endParam := strings.TrimSpace(c.Query("end_date")); endParam != "" {
+		t, err := time.Parse("2006-01-02", endParam)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "end_date must be YYYY-MM-DD"})
+		}
+		end := t.Add(24 * time.Hour)
+		filter.EndDate = &end
+	}
 
 	orders, total, err := h.orders.ListAdminOrders(c.Context(), filter)
 	if err != nil {
@@ -219,4 +238,29 @@ func (h *OrderHandler) AdminListOrders(c *fiber.Ctx) error {
 		appliedLimit = 20
 	}
 	return c.JSON(adminOrderListResponse(orders, total, appliedPage, appliedLimit))
+}
+
+// AdminCancelOrder cancels a PENDING or COMPLETED order and restores its reserved zone stock
+// to Redis — the same restore path the ExpirationWorker uses for unpaid orders that time out.
+// A CHECKED_IN, already-CANCELLED, or EXPIRED order cannot be cancelled this way. ADMIN only.
+func (h *OrderHandler) AdminCancelOrder(c *fiber.Ctx) error {
+	orderID := c.Params("id")
+
+	order, wasActive, err := h.orders.AdminCancelOrder(c.Context(), orderID)
+	if err != nil {
+		if errors.Is(err, repository.ErrOrderNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Order not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to cancel order"})
+	}
+	if !wasActive {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Order cannot be cancelled from its current status", "status": order.Status})
+	}
+
+	if err := h.redis.RestoreZoneStock(c.Context(), order.EventID, order.ZoneID, order.Quantity); err != nil {
+		log.Printf("⚠️ Order %s cancelled but failed to restore zone stock: %v\n", order.ID, err)
+	}
+	_ = h.redis.ClearOrderExpiry(c.Context(), order.ID)
+
+	return c.JSON(fiber.Map{"order_id": order.ID, "status": order.Status})
 }
