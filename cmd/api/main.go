@@ -187,6 +187,9 @@ func main() {
 	ticketHandler := handler.NewTicketHandler(redisRepo, redisClient, kafkaProducer, eventRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, redisRepo)
 
+	categoryRepo := repository.NewCategoryRepository(dbPool)
+	categoryHandler := handler.NewCategoryHandler(categoryRepo)
+
 	seatRepo := repository.NewSeatRepository(dbPool)
 	seatHandler := handler.NewSeatHandler(seatRepo, redisRepo, kafkaProducer, eventRepo, userRepo)
 
@@ -321,6 +324,11 @@ func main() {
 	admin.Post("/news", newsHandler.CreateNews)
 	admin.Put("/news/:id", newsHandler.UpdateNews)
 	admin.Delete("/news/:id", newsHandler.DeleteNews)
+
+	admin.Get("/categories", categoryHandler.AdminListCategories)
+	admin.Post("/categories", categoryHandler.CreateCategory)
+	admin.Put("/categories/:id", categoryHandler.UpdateCategory)
+	admin.Delete("/categories/:id", categoryHandler.DeleteCategory)
 
 	admin.Get("/users", userHandler.AdminListUsers)
 	admin.Post("/users", userHandler.AdminCreateUser)
