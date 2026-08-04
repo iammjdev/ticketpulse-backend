@@ -151,6 +151,18 @@ func (h *AdminHandler) ZoneBreakdown(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"zones": zones})
 }
 
+// FlushCache deletes every cache:* key (a static read-through cache namespace) and reports
+// how many keys were cleared. Strictly scoped — seat locks, virtual queues, ticket/payment
+// holds, and session state live under other prefixes and are never touched by this action.
+// ADMIN only, irreversible.
+func (h *AdminHandler) FlushCache(c *fiber.Ctx) error {
+	cleared, err := h.redis.FlushCacheKeys(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to flush cache"})
+	}
+	return c.JSON(fiber.Map{"cleared_count": cleared})
+}
+
 // Health reports live infrastructure metrics — Redis payment-hold count, Kafka consumer lag on
 // the order-paid topic, and PostgreSQL connection pool stats + ping latency — so the admin
 // dashboard's system health panel reflects the real running stack instead of a placeholder.

@@ -73,6 +73,11 @@ type RedisRepository interface {
 	// MemoryUsageBytes reports Redis's own used_memory (INFO memory) for the admin dashboard's
 	// system health panel.
 	MemoryUsageBytes(ctx context.Context) (int64, error)
+	// FlushCacheKeys deletes every key under the cache:* namespace and returns how many were
+	// cleared. The prefix is hardcoded (not caller-supplied) so this can never be pointed at
+	// lock:*, queue:*, hold:*, order:*, or session state — those are live transactional state,
+	// not read-through cache, and must never be touched by this action.
+	FlushCacheKeys(ctx context.Context) (int64, error)
 }
 
 type redisRepository struct {
@@ -404,6 +409,35 @@ func (r *redisRepository) FlushAllQueues(ctx context.Context) (int64, error) {
 		}
 	}
 	return flushed, nil
+}
+
+const cacheKeyPattern = "cache:*"
+
+// FlushCacheKeys scans for every key under cache:* (in SCAN batches, never a blocking KEYS
+// call) and deletes them, returning the number cleared. Strictly scoped to that one prefix —
+// seat locks (hold:*), virtual queues (event:*:queue), payment holds (order:expire:*), and
+// session/password-reset state all live under different prefixes and are never matched here.
+func (r *redisRepository) FlushCacheKeys(ctx context.Context) (int64, error) {
+	var cleared int64
+	var cursor uint64
+	for {
+		keys, next, err := r.rdb.Scan(ctx, cursor, cacheKeyPattern, 100).Result()
+		if err != nil {
+			return cleared, err
+		}
+		if len(keys) > 0 {
+			n, err := r.rdb.Del(ctx, keys...).Result()
+			if err != nil {
+				return cleared, err
+			}
+			cleared += n
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return cleared, nil
 }
 
 func (r *redisRepository) MemoryUsageBytes(ctx context.Context) (int64, error) {

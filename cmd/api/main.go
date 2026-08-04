@@ -351,6 +351,7 @@ func main() {
 	admin.Get("/dashboard/sales-series", adminHandler.SalesSeries)
 	admin.Get("/dashboard/zone-breakdown", adminHandler.ZoneBreakdown)
 	admin.Get("/dashboard/health", adminHandler.Health)
+	admin.Post("/system/flush-cache", adminHandler.FlushCache)
 
 	admin.Get("/queue/status", adminQueueHandler.Status)
 	admin.Put("/queue/rate", adminQueueHandler.SetRate)
